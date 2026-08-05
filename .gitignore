@@ -1,0 +1,15 @@
+﻿.venv/
+.vscode/
+.env
+tmp/
+logs/
+
+__pycache__/
+*.pyc
+*.egg-info/
+
+*.pt
+*.pth
+*.h5
+*.sh
+CLAUDE.md
