@@ -1,15 +1,20 @@
 ﻿.venv/
 .vscode/
 .env
-tmp/
+.tmp/
 logs/
 
 __pycache__/
 *.pyc
 *.egg-info/
 
+# Hydra
+outputs/
+multirun/
+
 *.pt
 *.pth
 *.h5
 *.sh
+PET*.ESMF_LogFile
 CLAUDE.md

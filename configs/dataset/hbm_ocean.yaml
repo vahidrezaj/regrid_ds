@@ -1,0 +1,12 @@
+name: hbm_ocean
+
+folder: extract_2013-2025_currents
+variable_names: [elev, uvel, vvel, salt, temp]
+
+# interpolation/extrapolation method(s): a single string or a list of strings with one entry per variable
+interp_method: bilinear
+extrap_method: null
+
+reader_fn:
+  _target_: hbm_prep.io_functions.read_nc
+  _partial_: true

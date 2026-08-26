@@ -1,0 +1,6 @@
+defaults:
+  - dataset: hbm_ocean
+  - preprocessing: baltic_sea
+  - _self_
+
+output_path: /data/${preprocessing.name}

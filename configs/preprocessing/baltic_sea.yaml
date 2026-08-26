@@ -1,0 +1,28 @@
+name: baltic_sea
+
+preproc_cls:
+  _target_: hbm_prep.preprocssesing.HBMPreProcessing
+  _partial_: true
+
+# domain_size in km
+domain_size: 1500
+grid_size: 500
+lat_0: 60
+lon_0: 20
+
+from_to:
+  - 2013-01-01T01:00
+  - 2025-01-01T00:00
+ts: 1 # [hour]
+
+# Zarr writer:
+time_chunk: 24  # [hour]
+clevel: 3
+
+# ocean file prefixes required for regridding
+ocean_prefix:
+  - BS
+  - IDW
+
+
+

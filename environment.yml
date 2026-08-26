@@ -1,0 +1,46 @@
+name: geo_env
+
+channels:
+  - conda-forge
+
+dependencies:
+  - python=3.11
+
+  # Core numerical/scientific stack
+  - numpy>=2.0
+  - scipy>=1.10
+  - pandas
+  - xarray>=2024.0
+  - dask>=2026.7
+
+  # NetCDF / HDF5 / Zarr
+  - netcdf4>=1.6
+  - h5netcdf>=1.3
+  - h5py>=3.0
+  - zarr>=2.18
+  - numcodecs>=0.13
+
+  # Geospatial
+  - pyproj>=3.6
+  - shapely
+  - cartopy>=0.23
+  - cf_xarray
+
+  # Regridding
+  - esmf=8.4.2
+  - esmpy=8.4.2
+  - xesmf>=0.8
+
+  # Other runtime dependencies
+  - hydra-core>=1.3.2
+  - xgcm>=0.8
+  - tqdm>=4.66
+  - python-dotenv>=1.0
+  - matplotlib>=3.7
+
+  # Development
+  - pytest>=7.0
+  - ruff>=0.6
+  - jupyterlab>=4.0
+  - ipywidgets>=8.0
+  - ipykernel>=6.0

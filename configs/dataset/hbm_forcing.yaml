@@ -1,0 +1,12 @@
+name: hbm_forcing
+
+folder: winds_extract
+variable_names: [var1, var11, var33, var34]
+
+# interpolation/extrapolation method(s): a single string or a list of strings with one entry per variable
+interp_method: bilinear
+extrap_method: null
+
+reader_fn:
+  _target_: hbm_prep.io_functions.read_nc
+  _partial_: true
