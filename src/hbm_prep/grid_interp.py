@@ -76,8 +76,7 @@ def create_local_metric_grid(
     lon_grid_b, lat_grid_b = inv.transform(xx_b, yy_b)
 
     # compute convergence angles:
-    p = Proj(f"+proj={proj_type} +lat_0={lat_0} +lon_0={lon_0} "
-            "+datum=WGS84 +units=m")
+    p = Proj(f"+proj={proj_type} +lat_0={lat_0} +lon_0={lon_0} +datum=WGS84 +units=m")
     factors = p.get_factors(lon_grid, lat_grid)
     gamma_rad = np.deg2rad(factors.meridian_convergence)
 
@@ -94,7 +93,7 @@ def create_local_metric_grid(
         'sin_g': xr.DataArray(sin_g, dims=("y", "x")),
         'lat_b': lat_grid_b,
         'lon_b': lon_grid_b,
-        'proj': f'(+proj={proj_type} +lat_0={lat_0} +lon_0={lon_0} +datum=WGS84 +units=m)',
+        'crs': proj_crs.to_cf(),
     }
     return out
 
