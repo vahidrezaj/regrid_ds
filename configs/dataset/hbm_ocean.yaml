@@ -3,9 +3,16 @@ name: hbm_ocean
 folder: extract_2013-2025_currents
 variable_names: [elev, uvel, vvel, salt, temp]
 
+# Optional new names/attrs: 
+variable_attrs: null
+
 # interpolation/extrapolation method(s): a single string or a list of strings with one entry per variable
 interp_method: bilinear
 extrap_method: null
+
+# paired vector variables for rotation-aware regridding (from true north/east into the target grid's local basis):
+pair_vars_list:
+  - [uvel, vvel]
 
 reader_fn:
   _target_: hbm_prep.io_functions.read_nc

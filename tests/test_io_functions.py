@@ -210,3 +210,56 @@ def test_reopen_validates_configuration(tmp_path, target_grid, time_vector):
             target_grid=other_grid,
             time_chunk=4,
         )
+
+
+def test_write_renames_and_overrides_attrs(tmp_path, target_grid, time_vector):
+    zarr_path = tmp_path / "test.zarr"
+    variable_names = ["var33", "var34"]
+    variable_attrs = {
+        "var33": {"name": "uwind", "units": "m/s"},
+        "var34": {"name": "vwind", "units": "m/s"},
+    }
+
+    writer = ZarrDataWriter(
+        zarr_path=str(zarr_path),
+        time_vector=time_vector,
+        variable_names=variable_names,
+        target_grid=target_grid,
+        variable_attrs=variable_attrs,
+        time_chunk=4,
+    )
+
+    # source has no attrs at all, as with raw cdo-converted GRIB output;
+    # a stray "table" attr (real GRIB metadata) must not leak into the store
+    source_attrs = {"var33": {"table": 1}, "var34": {"table": 1}}
+    writer.write(_make_chunk(time_vector[0:2], variable_names, target_grid, 1.0, source_attrs))
+    writer.close()
+
+    ds = xr.open_zarr(str(zarr_path), consolidated=True)
+    assert "var33" not in ds.data_vars
+    assert "var34" not in ds.data_vars
+    assert ds["uwind"].attrs["units"] == "m/s"
+    assert ds["vwind"].attrs["units"] == "m/s"
+    assert "table" not in ds["uwind"].attrs
+    assert "name" not in ds["uwind"].attrs
+    assert np.all(ds["uwind"].values[0:2] == 1.0)
+    ds.close()
+
+
+def test_variable_attrs_rejects_duplicate_names(tmp_path, target_grid, time_vector):
+    zarr_path = tmp_path / "test.zarr"
+    variable_names = ["var33", "var34"]
+    variable_attrs = {
+        "var33": {"name": "wind", "units": "m/s"},
+        "var34": {"name": "wind", "units": "m/s"},
+    }
+
+    with pytest.raises(ValueError):
+        ZarrDataWriter(
+            zarr_path=str(zarr_path),
+            time_vector=time_vector,
+            variable_names=variable_names,
+            target_grid=target_grid,
+            variable_attrs=variable_attrs,
+            time_chunk=4,
+        )

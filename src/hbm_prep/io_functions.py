@@ -42,34 +42,33 @@ def read_nc(files:list) -> list:
 
 class ZarrDataWriter:
     '''
-    Pre-allocate a Zarr store sized for the full run and fill it in
-    incrementally, one array per variable plus a `nan_mask` marking which
-    timestamps have been written.
+    Pre-allocate a Zarr store sized for the full run and fill it in incrementally,
+    one array per variable plus a `nan_mask` marking which timestamps have been written.
 
     Parameters
     ----------
     zarr_path : str or Path
-        Output .zarr store location. Created if missing; if it already
-        exists, its configuration is validated against the parameters
-        below instead of being re-initialized.
+        Output .zarr store location. Created if missing; if it already exists, its configuration
+        is validated against the parameters below instead of being re-initialized.
     time_vector : np.ndarray of np.datetime64
-        Full time axis for the run (e.g. the entire multi-year period),
-        sorted ascending. `write()` maps each chunk's timestamps onto
-        this axis by exact match.
+        Full time axis for the run (e.g. the entire multi-year period), sorted ascending.
+        `write()` maps each chunk's timestamps onto this axis by exact match.
     variable_names : list of str
-        Variables to allocate, one Zarr array each, shape (time, y, x).
+        Variables expected in each `ds` passed to `write()`, keyed by their *source* name.
     target_grid : dict
-        Target grid, as returned by `create_local_metric_grid`: 'lat',
-        'lon' (2-D, shape (y, x)), 'y', 'x' (1-D projected coords,
-        metres), and 'crs' (CF grid-mapping attrs dict from
+        Target grid, as returned by `create_local_metric_grid`: 'lat', 'lon' (2-D, shape (y, x)),
+        'y', 'x' (1-D projected coords, metres), and 'crs' (CF grid-mapping attrs dict from
         `CRS.to_cf()`).
+    variable_attrs : dict, optional
+        `{source_name: {"name": store_name, "units": ..., ...}}`. When a source variable has an 
+        entry here, its data is stored under `store_name` instead of `source_name`, and these 
+        attrs are used verbatim instead of `ds[var].attrs`
     time_chunk : int, default 24
         Number of timesteps per Zarr chunk along the time axis.
     clevel : int, default 3
         Blosc/zstd compression level.
     dtype : np.floating, default np.float32
-        Storage dtype for data variables. Must be floating-point, since
-        unwritten cells are read back via `fill_value=np.nan`.
+        Storage dtype for data variables. Must be floating-point.
 
     Notes
     -----
@@ -86,6 +85,7 @@ class ZarrDataWriter:
         time_vector: np.ndarray,
         variable_names,
         target_grid,
+        variable_attrs=None,
         time_chunk=24,
         clevel=3,
         dtype=np.float32,
@@ -100,12 +100,22 @@ class ZarrDataWriter:
         self.time_vector = np.asarray(time_vector)
         self.variable_names = list(variable_names)
         self.grid = target_grid
+        self.variable_attrs = variable_attrs or {}
         self.time_chunk = time_chunk
         self.clevel = clevel
         self.dtype = dtype
-        # variables whose descriptive attrs have already been captured;
-        # descriptions are static per variable, so we only need this once
+
+        # variables whose descriptive attrs have already been captured
         self._attrs_written = set()
+
+        # source name -> name actually used in the store:
+        self._store_name = {
+            var: self.variable_attrs.get(var, {}).get("name", var)
+            for var in self.variable_names
+        }
+        store_names = list(self._store_name.values())
+        if len(set(store_names)) != len(store_names):
+            raise ValueError(f"duplicate target variable names in variable_attrs: {store_names}")
 
         if os.path.exists(self.zarr_path):
             self._validate_existing()
@@ -123,7 +133,7 @@ class ZarrDataWriter:
                     f"time_vector mismatch with existing store at {self.zarr_path}"
                 )
 
-            missing = set(self.variable_names) - set(existing.data_vars)
+            missing = set(self._store_name.values()) - set(existing.data_vars)
             if missing:
                 raise ValueError(
                     f"existing store at {self.zarr_path} is missing variables: {missing}"
@@ -185,12 +195,13 @@ class ZarrDataWriter:
         # lazy initailization:
         encoding = {}
         for var in self.variable_names:
-            ds[var] = (
+            store_name = self._store_name[var]
+            ds[store_name] = (
                 ("time", "y", "x"),
                 da.empty((nt, h, w), chunks=(self.time_chunk, h, w), dtype=self.dtype),
                 {"grid_mapping": "spatial_ref"},
             )
-            encoding[var] = {
+            encoding[store_name] = {
                 "chunks": (self.time_chunk, h, w),
                 "compressors": [compressor],
                 "fill_value": np.nan,
@@ -245,17 +256,21 @@ class ZarrDataWriter:
 
         attrs_changed = False
         for var in self.variable_names:
-            # force dim order regardless of how the caller's Dataset laid it out
-            self.store[var][positions, :, :] = ds[var].transpose("time", "y", "x").values
+            store_name = self._store_name[var]
 
-            # keep attrs (units, long_name, ...) from the source variable, captured once
+            self.store[store_name][positions, :, :] = ds[var].transpose("time", "y", "x").values
+
+            # keep attrs (units, long_name, ...)
             if var not in self._attrs_written:
+                # from variable_attrs, if None form the source variable
+                override = self.variable_attrs.get(var)
+                source_attrs = override if override is not None else ds[var].attrs
                 var_attrs = {
-                    k: v for k, v in ds[var].attrs.items()
-                    if k not in self._RESERVED_ATTRS
+                    k: v for k, v in source_attrs.items()
+                    if k not in self._RESERVED_ATTRS and k != "name"
                 }
                 if var_attrs:
-                    self.store[var].attrs.update(var_attrs)
+                    self.store[store_name].attrs.update(var_attrs)
                     attrs_changed = True
                 self._attrs_written.add(var)
 

@@ -3,9 +3,32 @@ name: hbm_forcing
 folder: winds_extract
 variable_names: [var1, var11, var33, var34]
 
+# Optional new names/attrs: 
+variable_attrs:
+  var1:
+    name: slp
+    units: Pa
+    long_name: sea level pressure
+  var11:
+    name: t2m
+    units: K
+    long_name: 2 metre temperature
+  var33:
+    name: uwind
+    units: m/s
+    long_name: 10 metre U wind component
+  var34:
+    name: vwind
+    units: m/s
+    long_name: 10 metre V wind component
+
 # interpolation/extrapolation method(s): a single string or a list of strings with one entry per variable
 interp_method: bilinear
 extrap_method: null
+
+# paired vector variables for rotation-aware regridding (from true north/east into the target grid's local basis):
+pair_vars_list:
+  - [var33, var34]
 
 reader_fn:
   _target_: hbm_prep.io_functions.read_nc

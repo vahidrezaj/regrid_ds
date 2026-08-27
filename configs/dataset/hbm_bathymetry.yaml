@@ -3,6 +3,9 @@ name: hbm_bathymetry
 folder: bathymetry
 variable_names: [level]
 
+# Optional new names/attrs: 
+variable_attrs: null
+
 # interpolation/extrapolation method(s): a single string or a list of strings with one entry per variable
 interp_method: bilinear
 extrap_method: null
