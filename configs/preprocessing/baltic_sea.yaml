@@ -19,10 +19,9 @@ ts: 1 # [hour]
 time_chunk: 24  # [hour]
 clevel: 3
 
-# ocean file prefixes required for regridding
-ocean_prefix:
-  - BS
-  - IDW
-
-
+# file prefixes required for regridding
+file_prefix:
+  hbm_ocean: [BS, IDW]
+  hbm_forcing: null
+  hbm_bathymetry: [bsns_005]
 

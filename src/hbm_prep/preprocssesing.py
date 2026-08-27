@@ -1,0 +1,177 @@
+'''
+HBM Preprocessing class
+'''
+
+from pathlib import Path
+import json
+import os
+from hydra.utils import instantiate
+from omegaconf import OmegaConf
+import numpy as np
+
+from hbm_prep.grid_interp import create_local_metric_grid, regridding_fn
+from hbm_prep.io_functions import ZarrDataWriter
+
+
+def _to_plain(value):
+    ''' resolve an OmegaConf node to a plain python object; pass through non-config values '''
+    return OmegaConf.to_container(value, resolve=True) if OmegaConf.is_config(value) else value
+
+
+class HBMPreProcessing:
+    '''
+    Read NetCDF source files, regrid them onto a common target grid, and write the
+    result to a Zarr store, one source file (or one row of paired regional files) at a
+    time. Progress is checkpointed to disk after every file so a crashed or interrupted
+    run can be resumed by re-instantiating with the same config instead of starting over.
+
+    Parameters
+    ----------
+    cfg : DictConfig
+        Merged Hydra config with (at least) the following keys:
+
+        - `dataset.folder` : source files subfolder, joined with `base_path`.
+        - `dataset.variable_names` : source variable names to read/regrid.
+        - `dataset.variable_attrs` : optional per-variable rename/attrs override,
+          forwarded to `ZarrDataWriter`.
+        - `dataset.interp_method` / `dataset.extrap_method` : passed to `regridding_fn`.
+        - `dataset.pair_vars_list` : optional list of `[u, v]` variable-name pairs that
+          need rotation-aware regridding, passed to `regridding_fn`.
+        - `dataset.reader_fn` : a `_partial_: true` target instantiated into `loader_fn`,
+          called with a list of file paths (one per region) and returning a matching
+          list of opened datasets.
+        - `dataset.name` : used to namespace the checkpoint file and Zarr store, and to
+          look up this dataset's entry in `preprocessing.file_prefix`.
+        - `preprocessing.file_prefix` : dict of `{dataset_name: [prefix, ...] or null}`.
+          Each prefix becomes one region's file queue (`data_path.glob(prefix + "*.nc")`,
+          sorted); a missing entry or `null` falls back to a single unprefixed queue.
+          Queues are advanced in lockstep, so all regions must have equal file counts.
+        - `preprocessing.domain_size` / `grid_size` / `lat_0` / `lon_0` : passed to
+          `create_local_metric_grid` to build the target grid.
+        - `preprocessing.from_to` / `ts` : start/end timestamps and step (hours) defining
+          `time_vector`, the full output time axis.
+        - `preprocessing.time_chunk` / `clevel` : forwarded to `ZarrDataWriter`.
+        - `output_path` : base directory for the checkpoint file and Zarr store.
+    
+    base_path : str or Path, optional
+        Prepended to `cfg.dataset.folder`.
+
+    Call
+    ----
+    `__call__()` runs the full loop: for each row of files still queued (in priority
+    order, per `regridding_fn`), read and regrid the ones falling inside `time_vector`,
+    write them to the Zarr store, then update/delete the checkpoint. Safe to call again
+    on an already-completed instance (no-op, since its checkpoint file is gone).
+    '''
+    def __init__(self, cfg, base_path=""):
+        self.data_path = Path(base_path) / Path(cfg.dataset.folder)
+        self.out_path = Path(cfg.output_path)
+
+        self.variable_names = list(cfg.dataset.variable_names)
+
+        # per-variable rename/attrs override for sources without usable
+        # metadata of their own (e.g. cdo-converted GRIB); None otherwise
+        self.variable_attrs = _to_plain(cfg.dataset.get("variable_attrs", None))
+
+        # init checkpoint with available files:
+        self.cp_path = self.out_path / f"checkpoint_{cfg.dataset.name}.tmp"
+        self.avail_files = []
+        if self.cp_path.exists():
+            with self.cp_path.open("r", encoding="utf-8") as f:
+                self.avail_files = [[Path(p) for p in row] for row in json.load(f)]
+
+        if len(self.avail_files) == 0:
+            prefixes = _to_plain(cfg.preprocessing.file_prefix.get(cfg.dataset.name)) or [""]
+            self.avail_files = [sorted(self.data_path.glob(pref+"*.nc"))
+                                for pref in prefixes]
+
+        # check length mismatch
+        lengths = {len(row) for row in self.avail_files}
+        if len(lengths) > 1:
+            raise ValueError(
+                f"file count mismatch across dataset regions: "
+                f"{[len(row) for row in self.avail_files]}"
+            )
+
+        # generate target grid:
+        self.target_grid = create_local_metric_grid(
+            domain_size_km= cfg.preprocessing.domain_size,
+            grid_size= cfg.preprocessing.grid_size,
+            lat_0= cfg.preprocessing.lat_0,
+            lon_0= cfg.preprocessing.lon_0,
+            proj_type= 'aeqd',
+        )
+
+        # time vector:
+        self.time_vector = np.arange(
+            np.datetime64(cfg.preprocessing.from_to[0]),
+            np.datetime64(cfg.preprocessing.from_to[1]),
+            np.timedelta64(cfg.preprocessing.ts, "h"),
+        )
+
+        # file reader function:
+        self.loader_fn = instantiate(cfg.dataset.reader_fn)
+
+        # dataset writer:
+        self.writer = ZarrDataWriter(
+            zarr_path= self.out_path / f"checkpoint_{cfg.dataset.name}.zarr",
+            time_vector= self.time_vector,
+            variable_names= self.variable_names,
+            target_grid= self.target_grid,
+            variable_attrs= self.variable_attrs,
+            time_chunk=cfg.preprocessing.time_chunk,
+            clevel=cfg.preprocessing.clevel,
+        )
+
+        self.interp_method = _to_plain(cfg.dataset.interp_method)
+        self.extrap_method = _to_plain(cfg.dataset.extrap_method)
+        self.pair_vars_list = _to_plain(cfg.dataset.get("pair_vars_list", []))
+
+    def __call__(self):
+        ''' read nc -> regrid -> write Zarr ; per file '''
+        # loop over files:
+        while self.avail_files and self.avail_files[0]:
+            files = [row[0] for row in self.avail_files]
+
+            # read files:
+            ds_list = self.loader_fn(files)
+
+            # trim time out of the time_vector range:
+            time = ds_list[0].time.values
+            time = np.asarray(time, dtype=self.time_vector.dtype)
+            time_mask = (time >= self.time_vector[0]) & \
+                        (time <= self.time_vector[-1])
+            time = time[time_mask]
+            if time.size == 0:
+                # this file doesn't have data in the range of time_vector
+                self.avail_files = [row[1:] for row in self.avail_files]
+                self._update_cp()
+                continue
+
+            # regridding into the target grid:
+            ds = regridding_fn(
+                ds_list,
+                self.target_grid,
+                self.variable_names,
+                time_mask,
+                self.interp_method,
+                self.extrap_method,
+                self.pair_vars_list,
+            )
+
+            # write Zarr dataset:
+            self.writer.write(ds)
+
+            # update avail_files and chekpoint
+            self.avail_files = [row[1:] for row in self.avail_files]
+            self._update_cp()
+
+        # everything completed successfully, so let's delete cp file :)
+        self.cp_path.unlink(missing_ok=True)
+
+    def _update_cp(self):
+        ''' update checkpoint file atomically '''
+        tmp_path = self.cp_path.with_name(self.cp_path.name + ".part")
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump([[str(p) for p in row] for row in self.avail_files], f)
+        os.replace(tmp_path, self.cp_path)
