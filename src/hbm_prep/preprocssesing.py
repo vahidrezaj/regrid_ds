@@ -73,6 +73,11 @@ class HBMPreProcessing:
         - `verbose` : bool, default `False`. `True` raises the module logger to
           `DEBUG`, adding skip reasons and per-step (read/regrid/write) timings on
           top of the always-on per-file `INFO` progress line.
+        - `dry_run` : bool, default `False`. `True` skips creating/opening the
+          output Zarr store, so `__init__` has no disk side effects. Call
+          `report()` instead of `__call__()` to log a summary (file counts,
+          checkpoint status, time range/step, target grid, output path/chunking)
+          without processing anything.
 
     base_path : str or Path, optional
         Prepended to `cfg.dataset.folder`.
@@ -92,10 +97,7 @@ class HBMPreProcessing:
     def __init__(self, cfg, base_path=""):
         self.dataset_name = cfg.dataset.name
         self.verbose = bool(cfg.get("verbose", False))
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s [%(levelname)s] %(message)s",
-        )
+        dry_run = bool(cfg.get("dry_run", False))
         logger.setLevel(logging.DEBUG if self.verbose else logging.INFO)
 
         self.data_path = Path(base_path) / Path(cfg.dataset.folder)
@@ -113,27 +115,31 @@ class HBMPreProcessing:
             with self.cp_path.open("r", encoding="utf-8") as f:
                 self.avail_files = [[Path(p) for p in row] for row in json.load(f)]
 
+        prefixes = _to_plain(cfg.preprocessing.file_prefix.get(self.dataset_name)) or [""]
+        fresh_files = [sorted(self.data_path.glob(pref + "*" + file_ext)) for pref in prefixes]
+        # original queue length, for reporting progress when resuming from a checkpoint
+        self.total_files_all = len(fresh_files[0]) if fresh_files and fresh_files[0] else 0
+
         if len(self.avail_files) == 0:
-            prefixes = _to_plain(cfg.preprocessing.file_prefix.get(self.dataset_name)) or [""]
-            self.avail_files = [sorted(self.data_path.glob(pref + "*" + file_ext))
-                                for pref in prefixes]
+            self.avail_files = fresh_files
 
         # check length mismatch
-        lengths = {len(row) for row in self.avail_files}
-        if len(lengths) > 1:
-            raise ValueError(
-                f"file count mismatch across dataset regions: "
-                f"{[len(row) for row in self.avail_files]}"
-            )
+        region_lengths = [len(row) for row in self.avail_files]
+        self.length_mismatch = len(set(region_lengths)) > 1
+        if self.length_mismatch and not dry_run:
+            raise ValueError(f"file count mismatch across dataset regions: {region_lengths}")
         self.total_files = (len(self.avail_files[0])
                             if self.avail_files and self.avail_files[0] else 0)
 
         # generate target grid:
+        self.grid_origin = (cfg.preprocessing.lat_0, cfg.preprocessing.lon_0)
+        self.domain_size = cfg.preprocessing.domain_size
+        self.grid_size = cfg.preprocessing.grid_size
         self.target_grid = create_local_metric_grid(
-            domain_size_km= cfg.preprocessing.domain_size,
-            grid_size= cfg.preprocessing.grid_size,
-            lat_0= cfg.preprocessing.lat_0,
-            lon_0= cfg.preprocessing.lon_0,
+            domain_size_km= self.domain_size,
+            grid_size= self.grid_size,
+            lat_0= self.grid_origin[0],
+            lon_0= self.grid_origin[1],
             proj_type= 'aeqd',
         )
 
@@ -157,14 +163,70 @@ class HBMPreProcessing:
         )
 
         # dataset writer:
+        self.zarr_path = self.out_path / f"checkpoint_{self.dataset_name}.zarr"
+        self.time_chunk = cfg.preprocessing.time_chunk
+        if dry_run:
+            # no need to initialize ZarrDataWriter. skip creating/opening Zarr fole on disk
+            return
+
         self.writer = ZarrDataWriter(
-            zarr_path= self.out_path / f"checkpoint_{self.dataset_name}.zarr",
+            zarr_path= self.zarr_path,
             time_vector= self.time_vector,
             variable_names= self.variable_names,
             target_grid= self.target_grid,
             variable_attrs= self.variable_attrs,
             time_chunk=cfg.preprocessing.time_chunk,
             clevel=cfg.preprocessing.clevel,
+        )
+
+    def report(self):
+        ''' log a summary of what __call__ would do, without touching any data '''
+        logger.info("[%s] source: %s", self.dataset_name, self.data_path)
+
+        if self.length_mismatch:
+            logger.warning(
+                "[%s] file count mismatch across regions: %s (would raise on a real run)",
+                self.dataset_name, [len(row) for row in self.avail_files],
+            )
+
+        if self.static:
+            done = self.npz_path.exists()
+            logger.info(
+                "[%s] static, %d region(s) -> %s (%s)",
+                self.dataset_name, len(self.avail_files), self.npz_path,
+                "already exists, would skip" if done else "would regrid now",
+            )
+            return
+
+        if not self.static and self.cp_path.exists():
+            logger.info(
+                "[%s] checkpoint %s: %d/%d files done, %d remaining",
+                self.dataset_name, self.cp_path,
+                self.total_files_all - self.total_files, self.total_files_all,
+                self.total_files,
+            )
+        else:
+            logger.info(
+                "[%s] no checkpoint, fresh start: %d files across %d region(s)",
+                self.dataset_name, self.total_files_all, len(self.avail_files),
+            )
+
+        ts = self.time_vector[1] - self.time_vector[0]
+        logger.info(
+            "[%s] time range: %s -> %s (%d steps, ts=%s)",
+            self.dataset_name, self.time_vector[0], self.time_vector[-1],
+            len(self.time_vector), ts,
+        )
+        logger.info(
+            "[%s] target grid: origin=(lat=%s, lon=%s), domain_size=%skm, "
+            "resolution=%.2fkm (grid_size=%d)",
+            self.dataset_name, *self.grid_origin, self.domain_size,
+            (self.target_grid['x'][1] - self.target_grid['x'][0]) / 1000,
+            self.grid_size,
+        )
+        logger.info(
+            "[%s] output: %s (time_chunk=%d)",
+            self.dataset_name, self.zarr_path, self.time_chunk,
         )
 
     def __call__(self):

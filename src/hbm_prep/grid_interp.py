@@ -171,14 +171,13 @@ def _regrid_helper(ds, target_grid, selected_vars:list, interp_method, masks, ex
         ignore_degenerate= True,
     )
 
-    # regridding:
-    ds_regridded = regridder(ds_source)
+    ds_regridded = regridder(ds_source[selected_vars])
 
     if masks[1] is not None:
         for var in selected_vars:
             ds_regridded[var] = ds_regridded[var].where(masks[1] > 0.5)
 
-    return ds_regridded[selected_vars]
+    return ds_regridded
 
 
 def regrid_xesmf(
