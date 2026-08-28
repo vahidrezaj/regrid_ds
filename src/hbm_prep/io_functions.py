@@ -3,11 +3,14 @@ Input/Output functions for read and save data
 '''
 
 import os
+from pathlib import Path
 
 import numpy as np
 import xarray as xr
 import dask.array as da
+import rioxarray
 import zarr
+from pyproj import Transformer
 from zarr.codecs import BloscCodec
 
 
@@ -31,8 +34,83 @@ def read_nc(files:list) -> list:
 
 
 
-# def read_tif_file():
-#     pass
+def read_tif(files: list, variable_names: list, crs=None) -> list:
+    '''
+    Read single-band-per-variable GeoTIFF rasters (e.g. a static bathymetry grid).
+
+    Each file's band(s) become one data variable per entry in `variable_names`
+    (band i -> variable_names[i]). Coordinates are built as 2-D "lat"/"lon"
+    (dims "y", "x"), reprojected to EPSG:4326 from the raster's CRS -- matching
+    the curvilinear lat/lon-as-2-D-coords shape already used for NEMO ocean
+    sources, so downstream regridding needs no special-casing for tif sources.
+    Nodata pixels are read back as NaN.
+
+    crs : optional CRS (anything accepted by `pyproj.CRS.from_user_input`,
+        e.g. "EPSG:4326"), used only when the raster itself has no CRS
+        embedded.
+
+    Returns : list of loaded ds
+    '''
+    ds_list = []
+    for file in files:
+        with rioxarray.open_rasterio(file, masked=True) as raster:
+            n_bands = raster.sizes["band"]
+            if n_bands != len(variable_names):
+                raise ValueError(
+                    f"{file}: raster has {n_bands} band(s), but {len(variable_names)} "
+                    f"variable_names were given: {variable_names}"
+                )
+
+            src_crs = raster.rio.crs or crs
+            if src_crs is None:
+                raise ValueError(
+                    f"{file}: raster has no embedded CRS and no `crs` override was given"
+                )
+
+            # native pixel-center coordinates -> 2-D lat/lon in EPSG:4326
+            x_mg, y_mg = np.meshgrid(raster.x.values, raster.y.values)
+            transformer = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
+            lon, lat = transformer.transform(x_mg, y_mg)
+
+            data = {var: raster.isel(band=i).values for i, var in enumerate(variable_names)}
+
+        ds = xr.Dataset(
+            {var: (("y", "x"), values) for var, values in data.items()},
+            coords={
+                "lat": (("y", "x"), lat),
+                "lon": (("y", "x"), lon),
+            },
+        )
+        ds_list.append(ds)
+
+    return ds_list
+
+
+def save_static_npz(path, arrays: dict, target_grid: dict):
+    '''
+    save a dict of time-invariant arrays + grid metadata to a .npz file.
+
+    arrays : dict of {store_name: np.ndarray}
+    target_grid : as returned by `create_local_metric_grid`
+
+    `crs` (a plain dict from `CRS.to_cf()`) is stashed as a 0-d object array;
+    read it back with `payload["crs"].item()`.
+    '''
+    payload = {
+        **arrays,
+        "lat": np.asarray(target_grid["lat"]),
+        "lon": np.asarray(target_grid["lon"]),
+        "y": np.asarray(target_grid["y"]),
+        "x": np.asarray(target_grid["x"]),
+        "crs": np.array(target_grid["crs"], dtype=object),
+    }
+
+    path = Path(path)
+
+    tmp_path = path.with_suffix(path.suffix + ".part")
+    with tmp_path.open("wb") as f:
+        np.savez(f, **payload)
+    os.replace(tmp_path, path)
 
 
 

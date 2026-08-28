@@ -300,8 +300,11 @@ def regridding_fn(
         Target grid, as returned by `create_local_metric_grid`.
     variable_names : list
         Variables to regrid (e.g., ['sst', 'ssh', 'u', 'v']).
-    time_mask : array-like of bool
+    time_mask : array-like of bool, or None
         Boolean mask selecting time steps to keep, applied before regridding.
+        `None` means the sources have no time axis at all (e.g. a static
+        bathymetry raster): each source is regridded as-is, with no
+        time/depth trimming.
     interp_method : list or str
         Passed through to `regrid_xesmf` (e.g. 'bilinear', 'conservative').
     extrap_method : list or str or None
@@ -323,8 +326,9 @@ def regridding_fn(
     '''
     ds_regridded = []
     for ds in ds_list:
-        # select the first depth index, if var is 3D
-        ds = ds.map(lambda da: da[time_mask, 0] if da.ndim > 3 else da[time_mask])
+        if time_mask is not None:
+            # select the first depth index, if var is 3D
+            ds = ds.map(lambda da: da[time_mask, 0] if da.ndim > 3 else da[time_mask])
 
         # create masks:
         sample_array = ds[variable_names[0]]

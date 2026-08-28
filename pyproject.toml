@@ -26,6 +26,7 @@ dependencies = [
     "zarr>=3.0",
     "numcodecs>=0.13",
     "matplotlib>=3.7",
+    "rioxarray>=0.15",
 ]
 
 [project.optional-dependencies]

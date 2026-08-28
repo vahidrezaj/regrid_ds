@@ -25,6 +25,8 @@ dependencies:
   - shapely
   - cartopy>=0.23
   - cf_xarray
+  - rioxarray>=0.15
+  - rasterio
 
   # Regridding
   - esmf=8.4.2

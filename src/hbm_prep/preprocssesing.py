@@ -10,7 +10,7 @@ from omegaconf import OmegaConf
 import numpy as np
 
 from hbm_prep.grid_interp import create_local_metric_grid, regridding_fn
-from hbm_prep.io_functions import ZarrDataWriter
+from hbm_prep.io_functions import ZarrDataWriter, save_static_npz
 
 
 def _to_plain(value):
@@ -40,49 +40,61 @@ class HBMPreProcessing:
         - `dataset.reader_fn` : a `_partial_: true` target instantiated into `loader_fn`,
           called with a list of file paths (one per region) and returning a matching
           list of opened datasets.
-        - `dataset.name` : used to namespace the checkpoint file and Zarr store, and to
-          look up this dataset's entry in `preprocessing.file_prefix`.
+        - `dataset.name` : used to namespace the checkpoint/output file, and to look up
+          this dataset's entry in `preprocessing.file_prefix`.
+        - `dataset.file_ext` : source file extension to glob for, default `".nc"`.
+        - `dataset.static` : bool, default `False`. `True` marks a time-invariant
+          source (e.g. a bathymetry raster): no `time_vector`/`ZarrDataWriter`/
+          per-file checkpoint, just one regrid, saved to a `.npz` file. See
+          `_process_static`.
         - `preprocessing.file_prefix` : dict of `{dataset_name: [prefix, ...] or null}`.
-          Each prefix becomes one region's file queue (`data_path.glob(prefix + "*.nc")`,
-          sorted); a missing entry or `null` falls back to a single unprefixed queue.
-          Queues are advanced in lockstep, so all regions must have equal file counts.
+          Each prefix becomes one region's file queue
+          (`data_path.glob(prefix + "*" + file_ext)`, sorted); a missing entry or
+          `null` falls back to a single unprefixed queue. Queues are advanced in
+          lockstep, so all regions must have equal file counts.
         - `preprocessing.domain_size` / `grid_size` / `lat_0` / `lon_0` : passed to
           `create_local_metric_grid` to build the target grid.
         - `preprocessing.from_to` / `ts` : start/end timestamps and step (hours) defining
-          `time_vector`, the full output time axis.
+          `time_vector`, the full output time axis. Unused when `dataset.static` is `True`.
         - `preprocessing.time_chunk` / `clevel` : forwarded to `ZarrDataWriter`.
-        - `output_path` : base directory for the checkpoint file and Zarr store.
-    
+          Unused when `dataset.static` is `True`.
+        - `output_path` : base directory for the checkpoint file and Zarr store /
+          `.npz` file.
+
     base_path : str or Path, optional
         Prepended to `cfg.dataset.folder`.
 
     Call
     ----
-    `__call__()` runs the full loop: for each row of files still queued (in priority
-    order, per `regridding_fn`), read and regrid the ones falling inside `time_vector`,
-    write them to the Zarr store, then update/delete the checkpoint. Safe to call again
-    on an already-completed instance (no-op, since its checkpoint file is gone).
+    For time-series datasets, `__call__()` runs the full loop: for each row of files
+    still queued (in priority order, per `regridding_fn`), read and regrid the ones
+    falling inside `time_vector`, write them to the Zarr store, then update/delete the
+    checkpoint. Safe to call again on an already-completed instance (no-op, since its
+    checkpoint file is gone).
+
+    For static datasets (`dataset.static: true`), `__call__()` instead delegates to
+    `_process_static`: reads and regrids the (single) row of files once and saves the
+    result to a `.npz` file, skipping entirely if that file already exists.
     '''
     def __init__(self, cfg, base_path=""):
         self.data_path = Path(base_path) / Path(cfg.dataset.folder)
         self.out_path = Path(cfg.output_path)
 
         self.variable_names = list(cfg.dataset.variable_names)
-
-        # per-variable rename/attrs override for sources without usable
-        # metadata of their own (e.g. cdo-converted GRIB); None otherwise
         self.variable_attrs = _to_plain(cfg.dataset.get("variable_attrs", None))
+        self.static = bool(cfg.dataset.get("static", False))
+        file_ext = cfg.dataset.get("file_ext", ".nc")
 
-        # init checkpoint with available files:
+        # init checkpoint with available files (time-series datasets only):
         self.cp_path = self.out_path / f"checkpoint_{cfg.dataset.name}.tmp"
         self.avail_files = []
-        if self.cp_path.exists():
+        if not self.static and self.cp_path.exists():
             with self.cp_path.open("r", encoding="utf-8") as f:
                 self.avail_files = [[Path(p) for p in row] for row in json.load(f)]
 
         if len(self.avail_files) == 0:
             prefixes = _to_plain(cfg.preprocessing.file_prefix.get(cfg.dataset.name)) or [""]
-            self.avail_files = [sorted(self.data_path.glob(pref+"*.nc"))
+            self.avail_files = [sorted(self.data_path.glob(pref + "*" + file_ext))
                                 for pref in prefixes]
 
         # check length mismatch
@@ -102,15 +114,24 @@ class HBMPreProcessing:
             proj_type= 'aeqd',
         )
 
+        # file reader function:
+        self.loader_fn = instantiate(cfg.dataset.reader_fn)
+
+        self.interp_method = _to_plain(cfg.dataset.interp_method)
+        self.extrap_method = _to_plain(cfg.dataset.extrap_method)
+        self.pair_vars_list = _to_plain(cfg.dataset.get("pair_vars_list", []))
+
+        if self.static:
+            # no time axis: one-shot regrid, saved as .npz (see _process_static)
+            self.npz_path = self.out_path / f"{cfg.dataset.name}.npz"
+            return
+
         # time vector:
         self.time_vector = np.arange(
             np.datetime64(cfg.preprocessing.from_to[0]),
             np.datetime64(cfg.preprocessing.from_to[1]),
             np.timedelta64(cfg.preprocessing.ts, "h"),
         )
-
-        # file reader function:
-        self.loader_fn = instantiate(cfg.dataset.reader_fn)
 
         # dataset writer:
         self.writer = ZarrDataWriter(
@@ -123,12 +144,12 @@ class HBMPreProcessing:
             clevel=cfg.preprocessing.clevel,
         )
 
-        self.interp_method = _to_plain(cfg.dataset.interp_method)
-        self.extrap_method = _to_plain(cfg.dataset.extrap_method)
-        self.pair_vars_list = _to_plain(cfg.dataset.get("pair_vars_list", []))
-
     def __call__(self):
-        ''' read nc -> regrid -> write Zarr ; per file '''
+        ''' read -> regrid -> write ; static datasets run once, others loop per file '''
+        if self.static:
+            self._process_static()
+            return
+
         # loop over files:
         while self.avail_files and self.avail_files[0]:
             files = [row[0] for row in self.avail_files]
@@ -170,8 +191,39 @@ class HBMPreProcessing:
         self.cp_path.unlink(missing_ok=True)
 
     def _update_cp(self):
-        ''' update checkpoint file atomically '''
+        ''' update checkpoint file '''
         tmp_path = self.cp_path.with_name(self.cp_path.name + ".part")
         with tmp_path.open("w", encoding="utf-8") as f:
             json.dump([[str(p) for p in row] for row in self.avail_files], f)
         os.replace(tmp_path, self.cp_path)
+
+    def _process_static(self):
+        ''' one-shot regrid + save for time-invariant datasets (e.g. bathymetry) '''
+        if self.npz_path.exists():
+            print(f"{self.npz_path} already exists, skipping")
+            return
+
+        files = [row[0] for row in self.avail_files]
+        ds_list = self.loader_fn(files)
+
+        ds = regridding_fn(
+            ds_list,
+            self.target_grid,
+            self.variable_names,
+            None,
+            self.interp_method,
+            self.extrap_method,
+            self.pair_vars_list,
+        )
+
+        arrays = {
+            self._store_name(var): np.asarray(ds[var].values)
+            for var in self.variable_names
+        }
+        save_static_npz(self.npz_path, arrays, self.target_grid)
+
+    def _store_name(self, var):
+        ''' source variable name -> name to use in the output, per variable_attrs '''
+        if not self.variable_attrs:
+            return var
+        return self.variable_attrs.get(var, {}).get("name", var)
