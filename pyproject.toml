@@ -21,7 +21,6 @@ dependencies = [
     "pyproj>=3.6",
     "cartopy>=0.23",
     "xgcm>=0.8",
-    "tqdm>=4.66",
     "python-dotenv>=1.0",
     "zarr>=3.0",
     "numcodecs>=0.13",

@@ -4,3 +4,4 @@ defaults:
   - _self_
 
 output_path: /data/${preprocessing.name}
+verbose: false

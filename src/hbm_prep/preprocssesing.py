@@ -3,7 +3,10 @@ HBM Preprocessing class
 '''
 
 from pathlib import Path
+from datetime import timedelta
+from time import monotonic
 import json
+import logging
 import os
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
@@ -12,10 +15,17 @@ import numpy as np
 from hbm_prep.grid_interp import create_local_metric_grid, regridding_fn
 from hbm_prep.io_functions import ZarrDataWriter, save_static_npz
 
+logger = logging.getLogger(__name__)
+
 
 def _to_plain(value):
     ''' resolve an OmegaConf node to a plain python object; pass through non-config values '''
     return OmegaConf.to_container(value, resolve=True) if OmegaConf.is_config(value) else value
+
+
+def _fmt_duration(seconds):
+    ''' format a duration in seconds as H:MM:SS '''
+    return str(timedelta(seconds=int(seconds)))
 
 
 class HBMPreProcessing:
@@ -60,6 +70,9 @@ class HBMPreProcessing:
           Unused when `dataset.static` is `True`.
         - `output_path` : base directory for the checkpoint file and Zarr store /
           `.npz` file.
+        - `verbose` : bool, default `False`. `True` raises the module logger to
+          `DEBUG`, adding skip reasons and per-step (read/regrid/write) timings on
+          top of the always-on per-file `INFO` progress line.
 
     base_path : str or Path, optional
         Prepended to `cfg.dataset.folder`.
@@ -77,6 +90,14 @@ class HBMPreProcessing:
     result to a `.npz` file, skipping entirely if that file already exists.
     '''
     def __init__(self, cfg, base_path=""):
+        self.dataset_name = cfg.dataset.name
+        self.verbose = bool(cfg.get("verbose", False))
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s] %(message)s",
+        )
+        logger.setLevel(logging.DEBUG if self.verbose else logging.INFO)
+
         self.data_path = Path(base_path) / Path(cfg.dataset.folder)
         self.out_path = Path(cfg.output_path)
 
@@ -86,14 +107,14 @@ class HBMPreProcessing:
         file_ext = cfg.dataset.get("file_ext", ".nc")
 
         # init checkpoint with available files (time-series datasets only):
-        self.cp_path = self.out_path / f"checkpoint_{cfg.dataset.name}.tmp"
+        self.cp_path = self.out_path / f"checkpoint_{self.dataset_name}.tmp"
         self.avail_files = []
         if not self.static and self.cp_path.exists():
             with self.cp_path.open("r", encoding="utf-8") as f:
                 self.avail_files = [[Path(p) for p in row] for row in json.load(f)]
 
         if len(self.avail_files) == 0:
-            prefixes = _to_plain(cfg.preprocessing.file_prefix.get(cfg.dataset.name)) or [""]
+            prefixes = _to_plain(cfg.preprocessing.file_prefix.get(self.dataset_name)) or [""]
             self.avail_files = [sorted(self.data_path.glob(pref + "*" + file_ext))
                                 for pref in prefixes]
 
@@ -104,6 +125,8 @@ class HBMPreProcessing:
                 f"file count mismatch across dataset regions: "
                 f"{[len(row) for row in self.avail_files]}"
             )
+        self.total_files = (len(self.avail_files[0])
+                            if self.avail_files and self.avail_files[0] else 0)
 
         # generate target grid:
         self.target_grid = create_local_metric_grid(
@@ -123,7 +146,7 @@ class HBMPreProcessing:
 
         if self.static:
             # no time axis: one-shot regrid, saved as .npz (see _process_static)
-            self.npz_path = self.out_path / f"{cfg.dataset.name}.npz"
+            self.npz_path = self.out_path / f"{self.dataset_name}.npz"
             return
 
         # time vector:
@@ -135,7 +158,7 @@ class HBMPreProcessing:
 
         # dataset writer:
         self.writer = ZarrDataWriter(
-            zarr_path= self.out_path / f"checkpoint_{cfg.dataset.name}.zarr",
+            zarr_path= self.out_path / f"checkpoint_{self.dataset_name}.zarr",
             time_vector= self.time_vector,
             variable_names= self.variable_names,
             target_grid= self.target_grid,
@@ -151,11 +174,15 @@ class HBMPreProcessing:
             return
 
         # loop over files:
+        start_time = monotonic()
+        processed = 0
         while self.avail_files and self.avail_files[0]:
+            iter_start = monotonic()
             files = [row[0] for row in self.avail_files]
 
             # read files:
             ds_list = self.loader_fn(files)
+            read_time = monotonic()
 
             # trim time out of the time_vector range:
             time = ds_list[0].time.values
@@ -165,6 +192,7 @@ class HBMPreProcessing:
             time = time[time_mask]
             if time.size == 0:
                 # this file doesn't have data in the range of time_vector
+                logger.debug("[%s] skipping %s (outside time range)", self.dataset_name, files)
                 self.avail_files = [row[1:] for row in self.avail_files]
                 self._update_cp()
                 continue
@@ -179,16 +207,39 @@ class HBMPreProcessing:
                 self.extrap_method,
                 self.pair_vars_list,
             )
+            regrid_time = monotonic()
 
             # write Zarr dataset:
             self.writer.write(ds)
+            write_time = monotonic()
 
             # update avail_files and chekpoint
             self.avail_files = [row[1:] for row in self.avail_files]
             self._update_cp()
 
+            processed += 1
+            remaining = len(self.avail_files[0]) if self.avail_files else 0
+            elapsed = write_time - start_time
+            avg = elapsed / processed
+            eta = avg * remaining
+            logger.info(
+                "[%s] %d/%d done, %d left | %s | %.1fs (avg %.1fs/file, elapsed %s, ETA %s)",
+                self.dataset_name, processed, self.total_files, remaining,
+                ", ".join(f.name for f in files), write_time - iter_start,
+                avg, _fmt_duration(elapsed), _fmt_duration(eta),
+            )
+            logger.debug(
+                "[%s] step timings: read %.1fs, regrid %.1fs, write %.1fs",
+                self.dataset_name, read_time - iter_start,
+                regrid_time - read_time, write_time - regrid_time,
+            )
+
         # everything completed successfully, so let's delete cp file :)
         self.cp_path.unlink(missing_ok=True)
+        logger.info(
+            "[%s] completed: %d files processed in %s",
+            self.dataset_name, processed, _fmt_duration(monotonic() - start_time),
+        )
 
     def _update_cp(self):
         ''' update checkpoint file '''
@@ -200,7 +251,7 @@ class HBMPreProcessing:
     def _process_static(self):
         ''' one-shot regrid + save for time-invariant datasets (e.g. bathymetry) '''
         if self.npz_path.exists():
-            print(f"{self.npz_path} already exists, skipping")
+            logger.info("[%s] %s already exists, skipping", self.dataset_name, self.npz_path)
             return
 
         files = [row[0] for row in self.avail_files]
