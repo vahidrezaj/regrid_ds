@@ -5,23 +5,23 @@ preproc_cls:
   _partial_: true
 
 # domain_size in km
-domain_size: 1500
-grid_size: 500
-lat_0: 60
-lon_0: 20
+domain_size: 1400
+grid_size: 561  # // -> res: 2.5 km
+lat_0: 59.9
+lon_0: 19.9
 
-from_to:
-  - 2013-01-01T01:00
-  - 2025-01-01T00:00
-ts: 1 # [hour]
+from_to:  # // [start included, end excluded)
+  - 2013-10-01T01:00
+  - 2026-01-01T01:00
+ts: 1 # // time-step in `hour`
 
 # Zarr writer:
-time_chunk: 24  # [hour]
+time_chunk: 24  # // in `hour`
 clevel: 3
 
-# file prefixes required for regridding
+# file prefixes required for regridding *Prioritize based on order in list*
 file_prefix:
-  hbm_ocean: [BS, IDW]
+  hbm_ocean: [IDW, BS, NS]
   hbm_forcing: null
   hbm_bathymetry: [bsns_005]
 

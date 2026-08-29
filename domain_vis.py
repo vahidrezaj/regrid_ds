@@ -11,6 +11,9 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 from hydra.utils import instantiate
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")  # no display
+# pylint: disable=wrong-import-position
 import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
 
@@ -30,6 +33,17 @@ _PROJECTIONS = {
 def _to_plain(value):
     ''' resolve an OmegaConf node to a plain python object; pass through non-config values '''
     return OmegaConf.to_container(value, resolve=True) if OmegaConf.is_config(value) else value
+
+
+def _apply_variable_attrs(ds, variable_attrs):
+    ''' overlay `dataset.variable_attrs` (units/long_name/...) onto the regridded ds, mirroring
+    what `ZarrDataWriter.write` does at write time, so plot labels match the real output '''
+    if not variable_attrs:
+        return ds
+    for var, override in variable_attrs.items():
+        if var in ds.data_vars:
+            ds[var].attrs.update({k: v for k, v in override.items() if k != "name"})
+    return ds
 
 
 def _raw_slice(ds, var, mask):
@@ -67,7 +81,7 @@ def _plot_variable(cfg, var, ds, ds_list, mask, target_grid, proj_type):
         central_longitude=cfg.preprocessing.lon_0, central_latitude=cfg.preprocessing.lat_0,
     )
 
-    fig = plt.figure(constrained_layout=True)
+    fig = plt.figure(constrained_layout=True, figsize=(12, 5))
     ax_source = fig.add_subplot(1, 2, 1, projection=source_proj)
     ax_regrid = fig.add_subplot(1, 2, 2, projection=regrid_proj)
 
@@ -100,6 +114,8 @@ def _plot_variable(cfg, var, ds, ds_list, mask, target_grid, proj_type):
     label = f"{cfg.dataset.name}: {var}" + (f" [{units}]" if units else "")
     fig.colorbar(mesh, ax=[ax_source, ax_regrid], label=label)
 
+    return fig
+
 
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def main(cfg: DictConfig):
@@ -126,22 +142,32 @@ def main(cfg: DictConfig):
     variable_names = _to_plain(cfg.dataset.variable_names)
     pair_vars_list = _to_plain(cfg.dataset.get("pair_vars_list", []))
     static = bool(cfg.dataset.get("static", False))
+    use_mask = bool(cfg.dataset.get("use_mask", True))
 
     if static:
         mask = None
         ds = regridding_fn(ds_list, target_grid, variable_names, None,
-                            cfg.dataset.interp_method, cfg.dataset.extrap_method, pair_vars_list)
+                            cfg.dataset.interp_method, cfg.dataset.extrap_method, pair_vars_list,
+                            use_mask)
     else:
         mask = np.zeros(ds_list[0].sizes["time"], dtype=bool)
         i = random.randrange(len(mask)) # random timestamp
         mask[i] = True
         ds = regridding_fn(ds_list, target_grid, variable_names, mask,
-                            cfg.dataset.interp_method, cfg.dataset.extrap_method, pair_vars_list)
+                            cfg.dataset.interp_method, cfg.dataset.extrap_method, pair_vars_list,
+                            use_mask)
+
+    ds = _apply_variable_attrs(ds, _to_plain(cfg.dataset.get("variable_attrs", None)))
+
+    fig_dir = Path("figures")
+    fig_dir.mkdir(exist_ok=True)
 
     for var in variable_names:
-        _plot_variable(cfg, var, ds, ds_list, mask, target_grid, proj_type)
-
-    plt.show()
+        fig = _plot_variable(cfg, var, ds, ds_list, mask, target_grid, proj_type)
+        fig_path = fig_dir / f"{cfg.preprocessing.name}_{cfg.dataset.name}_{var}.png"
+        fig.savefig(fig_path, dpi=200)
+        plt.close(fig)
+        print(f"saved {fig_path}")
 
 
 if __name__ == "__main__":

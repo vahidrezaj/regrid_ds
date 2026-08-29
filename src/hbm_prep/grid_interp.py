@@ -98,14 +98,14 @@ def create_local_metric_grid(
     return out
 
 
-def _create_masks(sample_array, target_grid, thrd_ocean_fraction=0.5):
+def _create_masks(use_mask, sample_array, target_grid, thrd_ocean_fraction=0.5):
     '''
     Create source and target mask from `var_name` variable.
     If the variable doesn't contain NaN values, the function returns None
 
     Returns: source_mask, target_mask
     '''
-    if sample_array.isnull().any():
+    if use_mask and sample_array.isnull().any():
         ds_source = sample_array.to_dataset(name="var")
 
         ds_target = xr.Dataset(
@@ -287,6 +287,7 @@ def regridding_fn(
         interp_method,
         extrap_method,
         pair_vars_list,
+        use_mask=True,
 ) -> xr.Dataset:
     '''
     Regrid and mosaic one or more source datasets onto a target grid, then rotate
@@ -315,6 +316,11 @@ def regridding_fn(
     pair_vars_list : list of (str, str)
         (u, v) variable name pairs, already regridded, to rotate from true
         north/east into the target grid's local basis via `_rotate_vectors`.
+    use_mask : bool, default True
+        Whether NaNs in the source are a real land/ocean mask to respect (excluded
+        as regridding sources, and forcing `extrap_method` to `None`. Set to `False`
+        for sources whose NaNs are just incomplete domain coverage, so that `extrap_method`
+        fills the gap instead of being silently disabled.
 
     Returns
     -------
@@ -335,7 +341,7 @@ def regridding_fn(
         # create masks:
         sample_array = ds[variable_names[0]]
         sample_array = sample_array.isel(time=0) if "time" in sample_array.dims else sample_array
-        masks = _create_masks(sample_array, target_grid, thrd_ocean_fraction=0.5)
+        masks = _create_masks(use_mask, sample_array, target_grid, thrd_ocean_fraction=0.5)
 
         # regriding:
         ds_regridded.append(
@@ -346,6 +352,8 @@ def regridding_fn(
     # mosaic regridded sources by priority, if len(ds_regridded)>1
     if len(ds_regridded) > 1:
         ds = reduce(lambda base, nxt: base.combine_first(nxt), ds_regridded[1:], ds_regridded[0])
+    else:
+        ds = ds_regridded[0]
 
     # rotate vector variables:
     for pair_vars in pair_vars_list:

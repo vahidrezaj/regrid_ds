@@ -24,7 +24,9 @@ variable_attrs:
 
 # interpolation/extrapolation method(s): a single string or a list of strings with one entry per variable
 interp_method: bilinear
-extrap_method: null
+extrap_method: nearest_s2d
+
+use_mask: false
 
 # paired vector variables for rotation-aware regridding (from true north/east into the target grid's local basis):
 pair_vars_list:

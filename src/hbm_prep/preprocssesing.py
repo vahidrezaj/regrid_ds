@@ -149,6 +149,7 @@ class HBMPreProcessing:
         self.interp_method = _to_plain(cfg.dataset.interp_method)
         self.extrap_method = _to_plain(cfg.dataset.extrap_method)
         self.pair_vars_list = _to_plain(cfg.dataset.get("pair_vars_list", []))
+        self.use_mask = bool(cfg.dataset.get("use_mask", True))
 
         if self.static:
             # no time axis: one-shot regrid, saved as .npz (see _process_static)
@@ -268,6 +269,7 @@ class HBMPreProcessing:
                 self.interp_method,
                 self.extrap_method,
                 self.pair_vars_list,
+                self.use_mask,
             )
             regrid_time = monotonic()
 
@@ -327,6 +329,7 @@ class HBMPreProcessing:
             self.interp_method,
             self.extrap_method,
             self.pair_vars_list,
+            self.use_mask,
         )
 
         arrays = {

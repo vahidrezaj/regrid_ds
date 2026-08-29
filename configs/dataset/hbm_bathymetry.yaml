@@ -20,3 +20,5 @@ reader_fn:
   variable_names: ${dataset.variable_names}
   # bsns_005.tif has no CRS embedded, but its pixel coordinates are already plain WGS84 lon/lat
   crs: EPSG:4326
+  # coarsen the native raster down to ~this resolution before regridding;
+  resolution_km: 2

@@ -16,5 +16,6 @@ multirun/
 *.pth
 *.h5
 *.sh
+*.png
 PET*.ESMF_LogFile
 CLAUDE.md
