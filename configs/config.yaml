@@ -7,6 +7,8 @@ output_path: /data/${preprocessing.name}
 verbose: false
 dry_run: false
 
+
+# //log format//
 hydra:
   job_logging:
     formatters:

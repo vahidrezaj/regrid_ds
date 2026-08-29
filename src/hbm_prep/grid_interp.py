@@ -171,7 +171,7 @@ def _regrid_helper(ds, target_grid, selected_vars:list, interp_method, masks, ex
         ignore_degenerate= True,
     )
 
-    ds_regridded = regridder(ds_source[selected_vars])
+    ds_regridded = regridder(ds_source[selected_vars], keep_attrs=True)
 
     if masks[1] is not None:
         for var in selected_vars:
@@ -268,8 +268,11 @@ def _rotate_vectors(ds, pair_vars, target_grid):
     target_grid: contains cos_g and sin_g, `np.deg2rad(factors.meridian_convergence)`
     '''
     u, v = pair_vars
+    u_attrs, v_attrs = ds[u].attrs, ds[v].attrs
+
     u_rot = ds[u] * target_grid['cos_g'] - ds[v] * target_grid['sin_g']
     v_rot = ds[u] * target_grid['sin_g'] + ds[v] * target_grid['cos_g']
+    u_rot.attrs, v_rot.attrs = u_attrs, v_attrs
 
     ds[u], ds[v] = u_rot, v_rot
 
