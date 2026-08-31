@@ -136,6 +136,7 @@ def save_static_npz(path, arrays: dict, target_grid: dict):
     }
 
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
 
     tmp_path = path.with_suffix(path.suffix + ".part")
     with tmp_path.open("wb") as f:

@@ -73,11 +73,12 @@ class HBMPreProcessing:
         - `verbose` : bool, default `False`. `True` raises the module logger to
           `DEBUG`, adding skip reasons and per-step (read/regrid/write) timings on
           top of the always-on per-file `INFO` progress line.
-        - `dry_run` : bool, default `False`. `True` skips creating/opening the
-          output Zarr store, so `__init__` has no disk side effects. Call
-          `report()` instead of `__call__()` to log a summary (file counts,
-          checkpoint status, time range/step, target grid, output path/chunking)
-          without processing anything.
+        - `mode` : one of `"run"` (default), `"dry_run"`, `"check"`. `"dry_run"`
+          skips creating/opening the output Zarr store, so `__init__` has no disk
+          side effects -- call `report()` instead of `__call__()` to log a summary
+          (file counts, checkpoint status, time range/step, target grid, output
+          path/chunking) without processing anything. `"check"` is handled entirely
+          in `run.py` and never reaches this class.
 
     base_path : str or Path, optional
         Prepended to `cfg.dataset.folder`.
@@ -97,11 +98,13 @@ class HBMPreProcessing:
     def __init__(self, cfg, base_path=""):
         self.dataset_name = cfg.dataset.name
         self.verbose = bool(cfg.get("verbose", False))
-        dry_run = bool(cfg.get("dry_run", False))
+        dry_run = cfg.get("mode", "run") == "dry_run"
         logger.setLevel(logging.DEBUG if self.verbose else logging.INFO)
 
         self.data_path = Path(base_path) / Path(cfg.dataset.folder)
         self.out_path = Path(cfg.output_path)
+        if not dry_run:
+            self.out_path.mkdir(parents=True, exist_ok=True)
 
         self.variable_names = list(cfg.dataset.variable_names)
         self.variable_attrs = _to_plain(cfg.dataset.get("variable_attrs", None))
@@ -164,7 +167,7 @@ class HBMPreProcessing:
         )
 
         # dataset writer:
-        self.zarr_path = self.out_path / f"checkpoint_{self.dataset_name}.zarr"
+        self.zarr_path = self.out_path / f"{self.dataset_name}.zarr"
         self.time_chunk = cfg.preprocessing.time_chunk
         if dry_run:
             # no need to initialize ZarrDataWriter. skip creating/opening Zarr fole on disk
@@ -232,6 +235,10 @@ class HBMPreProcessing:
 
     def __call__(self):
         ''' read -> regrid -> write ; static datasets run once, others loop per file '''
+        print('='*60)
+        print(' '*20, f'[{self.dataset_name}]')
+        print('='*60)
+
         if self.static:
             self._process_static()
             return
@@ -287,9 +294,9 @@ class HBMPreProcessing:
             avg = elapsed / processed
             eta = avg * remaining
             logger.info(
-                "[%s] %d/%d done, %d left | %s | %.1fs (avg %.1fs/file, elapsed %s, ETA %s)",
+                "[%s] %d/%d done, %d left | %s | %.1fmin (avg %.1fs/file, elapsed %s, ETA %s)",
                 self.dataset_name, processed, self.total_files, remaining,
-                ", ".join(f.name for f in files), write_time - iter_start,
+                ", ".join(f.name for f in files), (write_time - iter_start)/60,
                 avg, _fmt_duration(elapsed), _fmt_duration(eta),
             )
             logger.debug(

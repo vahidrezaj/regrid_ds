@@ -12,6 +12,9 @@ __pycache__/
 outputs/
 multirun/
 
+# pipeline output (Zarr stores, .npz, checkpoints)
+data/
+
 *.pt
 *.pth
 *.h5

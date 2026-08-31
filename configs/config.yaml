@@ -3,9 +3,9 @@ defaults:
   - preprocessing: baltic_sea
   - _self_
 
-output_path: /data/${preprocessing.name}
+output_path: data/${preprocessing.name}
 verbose: false
-dry_run: false
+mode: run  # // one of: run, dry_run, check
 
 
 # //log format//
