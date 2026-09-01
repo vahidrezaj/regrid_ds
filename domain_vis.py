@@ -17,7 +17,7 @@ matplotlib.use("Agg")  # no display
 import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
 
-from hbm_prep.grid_interp import RegridPipeline, create_local_metric_grid
+from grid_interp import RegridPipeline, create_local_metric_grid
 
 
 load_dotenv()
@@ -75,10 +75,10 @@ def _plot_variable(cfg, var, ds, ds_list, mask, target_grid, proj_type):
     source_perimeters = [_perimeter(raw.lat.values, raw.lon.values) for raw in raw_slices]
 
     regrid_proj = _PROJECTIONS[proj_type](
-        central_longitude=cfg.preprocessing.lon_0, central_latitude=cfg.preprocessing.lat_0,
+        central_longitude=cfg.domain.lon_0, central_latitude=cfg.domain.lat_0,
     )
     source_proj = _PROJECTIONS[proj_type](
-        central_longitude=cfg.preprocessing.lon_0, central_latitude=cfg.preprocessing.lat_0,
+        central_longitude=cfg.domain.lon_0, central_latitude=cfg.domain.lat_0,
     )
 
     fig = plt.figure(constrained_layout=True, figsize=(12, 5))
@@ -124,15 +124,15 @@ def main(cfg: DictConfig):
     '''
     data_path = base_path / Path(cfg.dataset.folder)
     file_ext = cfg.dataset.get("file_ext", ".nc")
-    prefixes = _to_plain(cfg.preprocessing.file_prefix.get(cfg.dataset.name)) or [""]
+    prefixes = _to_plain(cfg.domain.file_prefix.get(cfg.dataset.name)) or [""]
     files = [sorted(data_path.glob(pref + "*" + file_ext))[0] for pref in prefixes]
 
     proj_type = "aeqd"
     target_grid = create_local_metric_grid(
-        domain_size_km=cfg.preprocessing.domain_size,
-        grid_size=cfg.preprocessing.grid_size,
-        lat_0=cfg.preprocessing.lat_0,
-        lon_0=cfg.preprocessing.lon_0,
+        domain_size_km=cfg.domain.domain_size,
+        grid_size=cfg.domain.grid_size,
+        lat_0=cfg.domain.lat_0,
+        lon_0=cfg.domain.lon_0,
         proj_type=proj_type,
     )
 
@@ -169,7 +169,7 @@ def main(cfg: DictConfig):
 
     for var in variable_names:
         fig = _plot_variable(cfg, var, ds, ds_list, mask, target_grid, proj_type)
-        fig_path = fig_dir / f"{cfg.preprocessing.name}_{cfg.dataset.name}_{var}.png"
+        fig_path = fig_dir / f"{cfg.domain.name}_{cfg.dataset.name}_{var}.png"
         fig.savefig(fig_path, dpi=200)
         plt.close(fig)
         print(f"saved {fig_path}")

@@ -7,7 +7,7 @@ import xarray as xr
 from pyproj import CRS
 from rasterio.transform import from_origin
 
-from hbm_prep.io_functions import ZarrDataWriter, read_tif, save_static_npz
+from io_functions import ZarrDataWriter, read_tif, save_static_npz
 
 
 @pytest.fixture

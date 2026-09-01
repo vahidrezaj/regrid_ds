@@ -13,7 +13,7 @@ import hydra
 from omegaconf import DictConfig
 from hydra.utils import instantiate
 
-from hbm_prep.validate import validate_output
+from validate import validate_output
 
 MODES = ("run", "dry_run", "check")
 
@@ -34,7 +34,7 @@ def main(cfg: DictConfig):
 
     load_dotenv()
     base_path = Path(os.getenv("LOCAL_DIR"))
-    preproc_factory = instantiate(cfg.preprocessing.preproc_cls)
+    preproc_factory = instantiate(cfg.domain.preproc_cls)
     preproc = preproc_factory(cfg, base_path)
 
     if mode == "dry_run":
