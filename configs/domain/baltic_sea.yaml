@@ -1,7 +1,7 @@
 name: baltic_sea
 
 preproc_cls:
-  _target_: hbm_prep.preprocssesing.HBMPreProcessing
+  _target_: hbm_regridder.HBMPreProcessing
   _partial_: true
 
 # domain_size in km

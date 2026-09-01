@@ -15,5 +15,5 @@ pair_vars_list:
   - [uvel, vvel]
 
 reader_fn:
-  _target_: hbm_prep.io_functions.read_nc
+  _target_: io_functions.read_nc
   _partial_: true

@@ -13,8 +13,8 @@ from pathlib import Path
 import numpy as np
 import xarray as xr
 
-from hbm_prep.grid_interp import create_local_metric_grid
-from hbm_prep.preprocssesing import _to_plain
+from grid_interp import create_local_metric_grid
+from hbm_regridder import _to_plain
 
 logger = logging.getLogger(__name__)
 
@@ -36,10 +36,10 @@ def _warn(msg, *args):
 
 def _target_grid(cfg):
     return create_local_metric_grid(
-        domain_size_km=cfg.preprocessing.domain_size,
-        grid_size=cfg.preprocessing.grid_size,
-        lat_0=cfg.preprocessing.lat_0,
-        lon_0=cfg.preprocessing.lon_0,
+        domain_size_km=cfg.domain.domain_size,
+        grid_size=cfg.domain.grid_size,
+        lat_0=cfg.domain.lat_0,
+        lon_0=cfg.domain.lon_0,
         proj_type="aeqd",
     )
 
@@ -69,12 +69,12 @@ def validate_zarr(cfg, out_path: Path) -> bool:
         _warn("leftover partial-write file: %s", part)
 
     expected_time = np.arange(
-        np.datetime64(cfg.preprocessing.from_to[0]),
-        np.datetime64(cfg.preprocessing.from_to[1]),
-        np.timedelta64(cfg.preprocessing.ts, "h"),
+        np.datetime64(cfg.domain.from_to[0]),
+        np.datetime64(cfg.domain.from_to[1]),
+        np.timedelta64(cfg.domain.ts, "h"),
     )
-    grid_size = cfg.preprocessing.grid_size
-    time_chunk = cfg.preprocessing.time_chunk
+    grid_size = cfg.domain.grid_size
+    time_chunk = cfg.domain.time_chunk
 
     with xr.open_zarr(zarr_path, consolidated=True) as ds:
         ok &= _ok(
@@ -88,7 +88,7 @@ def validate_zarr(cfg, out_path: Path) -> bool:
         ok &= _ok(
             "time" in ds.coords and np.array_equal(ds["time"].values, expected_time),
             "time axis matches config (%s -> %s, %d steps)",
-            cfg.preprocessing.from_to[0], cfg.preprocessing.from_to[1], len(expected_time),
+            cfg.domain.from_to[0], cfg.domain.from_to[1], len(expected_time),
         )
 
         missing = set(expected_vars) - set(ds.data_vars)
@@ -131,11 +131,11 @@ def validate_zarr(cfg, out_path: Path) -> bool:
             crs_attrs = ds["spatial_ref"].attrs
             ok &= _ok(
                 np.isclose(crs_attrs.get("latitude_of_projection_origin", np.nan),
-                           cfg.preprocessing.lat_0)
+                           cfg.domain.lat_0)
                 and np.isclose(crs_attrs.get("longitude_of_projection_origin", np.nan),
-                                cfg.preprocessing.lon_0),
+                                cfg.domain.lon_0),
                 "CRS origin matches config (lat_0=%s, lon_0=%s)",
-                cfg.preprocessing.lat_0, cfg.preprocessing.lon_0,
+                cfg.domain.lat_0, cfg.domain.lon_0,
             )
         else:
             ok = _ok(False, "spatial_ref coordinate present") and ok
@@ -188,7 +188,7 @@ def validate_npz(cfg, out_path: Path) -> bool:
     for part in out_path.glob("*.part"):
         _warn("leftover partial-write file: %s", part)
 
-    grid_size = cfg.preprocessing.grid_size
+    grid_size = cfg.domain.grid_size
     expected_keys = set(expected_vars) | {"lat", "lon", "y", "x", "crs"}
 
     with np.load(npz_path, allow_pickle=True) as payload:
@@ -225,11 +225,11 @@ def validate_npz(cfg, out_path: Path) -> bool:
             crs = np.asarray(payload["crs"]).item()
             ok &= _ok(
                 np.isclose(crs.get("latitude_of_projection_origin", np.nan),
-                           cfg.preprocessing.lat_0)
+                           cfg.domain.lat_0)
                 and np.isclose(crs.get("longitude_of_projection_origin", np.nan),
-                                cfg.preprocessing.lon_0),
+                                cfg.domain.lon_0),
                 "CRS origin matches config (lat_0=%s, lon_0=%s)",
-                cfg.preprocessing.lat_0, cfg.preprocessing.lon_0,
+                cfg.domain.lat_0, cfg.domain.lon_0,
             )
         else:
             ok = _ok(False, "crs array present") and ok
