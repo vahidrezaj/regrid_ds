@@ -8,7 +8,7 @@ whole REMOTE_DIR tree instead. Connection details and paths come from
 .env (FTP_HOST, FTP_USERNAME, FTP_PASS, REMOTE_DIR, LOCAL_DIR).
 
 Example usage:
-python -m hbm_prep.ftp_downloder.lftp_downloader -f extract_2013-2025_currents,winds_extract
+python -m lftp_downloader -f extract_2013-2025_currents,winds_extract
 
 Modes:
     `download`: mirror --continue --parallel={args.parallel} --only-newer

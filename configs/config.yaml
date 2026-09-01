@@ -1,9 +1,10 @@
 defaults:
   - dataset: hbm_ocean
-  - preprocessing: baltic_sea
+  - domain: baltic_sea
   - _self_
 
-output_path: data/${preprocessing.name}
+save_to: data
+output_path: ${save_to}/${domain.name}
 verbose: false
 mode: run  # // one of: run, dry_run, check
 

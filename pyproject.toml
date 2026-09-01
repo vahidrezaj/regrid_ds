@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "data-preproc"
 version = "0.1.0"
-description = "Preprocessing pipelines that convert ocean state and atmospheric forcing NetCDF data (per data source: hbm_prep, nemo_prep, ...) into .pt/.h5 tensors ready for ODyNO model training"
+description = "Preprocessing pipelines that convert ocean state and atmospheric forcing NetCDF data (per data source, e.g. hbm_regridder.py, a future nemo_regridder.py, ...) into .pt/.h5 tensors ready for ODyNO model training"
 requires-python = ">=3.10"
 authors = [{ name = "vahidreza", email = "jahanmard.vr@gmail.com" }]
 
@@ -42,8 +42,11 @@ dev = [
     "ipykernel>=6.0",
 ]
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.setuptools]
+py-modules = ["grid_interp", "io_functions", "validate", "hbm_regridder", "lftp_downloader"]
+
+[tool.setuptools.package-dir]
+"" = "src"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

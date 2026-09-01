@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import xarray as xr
 
-from hbm_prep.grid_interp import (
+from grid_interp import (
     RegridPipeline,
     _rotate_vectors,
     create_local_metric_grid,

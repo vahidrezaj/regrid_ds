@@ -15,7 +15,7 @@ interp_method: bilinear
 extrap_method: null
 
 reader_fn:
-  _target_: hbm_prep.io_functions.read_tif
+  _target_: io_functions.read_tif
   _partial_: true
   variable_names: ${dataset.variable_names}
   # bsns_005.tif has no CRS embedded, but its pixel coordinates are already plain WGS84 lon/lat

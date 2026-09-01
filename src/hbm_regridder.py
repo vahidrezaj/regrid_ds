@@ -12,8 +12,8 @@ from hydra.utils import instantiate
 from omegaconf import OmegaConf
 import numpy as np
 
-from hbm_prep.grid_interp import RegridPipeline, create_local_metric_grid
-from hbm_prep.io_functions import ZarrDataWriter, save_static_npz
+from grid_interp import RegridPipeline, create_local_metric_grid
+from io_functions import ZarrDataWriter, save_static_npz
 
 logger = logging.getLogger(__name__)
 
@@ -51,22 +51,22 @@ class HBMPreProcessing:
           called with a list of file paths (one per region) and returning a matching
           list of opened datasets.
         - `dataset.name` : used to namespace the checkpoint/output file, and to look up
-          this dataset's entry in `preprocessing.file_prefix`.
+          this dataset's entry in `domain.file_prefix`.
         - `dataset.file_ext` : source file extension to glob for, default `".nc"`.
         - `dataset.static` : bool, default `False`. `True` marks a time-invariant
           source (e.g. a bathymetry raster): no `time_vector`/`ZarrDataWriter`/
           per-file checkpoint, just one regrid, saved to a `.npz` file. See
           `_process_static`.
-        - `preprocessing.file_prefix` : dict of `{dataset_name: [prefix, ...] or null}`.
+        - `domain.file_prefix` : dict of `{dataset_name: [prefix, ...] or null}`.
           Each prefix becomes one region's file queue
           (`data_path.glob(prefix + "*" + file_ext)`, sorted); a missing entry or
           `null` falls back to a single unprefixed queue. Queues are advanced in
           lockstep, so all regions must have equal file counts.
-        - `preprocessing.domain_size` / `grid_size` / `lat_0` / `lon_0` : passed to
+        - `domain.domain_size` / `grid_size` / `lat_0` / `lon_0` : passed to
           `create_local_metric_grid` to build the target grid.
-        - `preprocessing.from_to` / `ts` : start/end timestamps and step (hours) defining
+        - `domain.from_to` / `ts` : start/end timestamps and step (hours) defining
           `time_vector`, the full output time axis. Unused when `dataset.static` is `True`.
-        - `preprocessing.time_chunk` / `clevel` : forwarded to `ZarrDataWriter`.
+        - `domain.time_chunk` / `clevel` : forwarded to `ZarrDataWriter`.
           Unused when `dataset.static` is `True`.
         - `output_path` : base directory for the checkpoint file and Zarr store /
           `.npz` file.
@@ -118,7 +118,7 @@ class HBMPreProcessing:
             with self.cp_path.open("r", encoding="utf-8") as f:
                 self.avail_files = [[Path(p) for p in row] for row in json.load(f)]
 
-        prefixes = _to_plain(cfg.preprocessing.file_prefix.get(self.dataset_name)) or [""]
+        prefixes = _to_plain(cfg.domain.file_prefix.get(self.dataset_name)) or [""]
         fresh_files = [sorted(self.data_path.glob(pref + "*" + file_ext)) for pref in prefixes]
         # original queue length, for reporting progress when resuming from a checkpoint
         self.total_files_all = len(fresh_files[0]) if fresh_files and fresh_files[0] else 0
@@ -135,9 +135,9 @@ class HBMPreProcessing:
                             if self.avail_files and self.avail_files[0] else 0)
 
         # generate target grid:
-        self.grid_origin = (cfg.preprocessing.lat_0, cfg.preprocessing.lon_0)
-        self.domain_size = cfg.preprocessing.domain_size
-        self.grid_size = cfg.preprocessing.grid_size
+        self.grid_origin = (cfg.domain.lat_0, cfg.domain.lon_0)
+        self.domain_size = cfg.domain.domain_size
+        self.grid_size = cfg.domain.grid_size
         self.target_grid = create_local_metric_grid(
             domain_size_km= self.domain_size,
             grid_size= self.grid_size,
@@ -166,14 +166,14 @@ class HBMPreProcessing:
 
         # time vector:
         self.time_vector = np.arange(
-            np.datetime64(cfg.preprocessing.from_to[0]),
-            np.datetime64(cfg.preprocessing.from_to[1]),
-            np.timedelta64(cfg.preprocessing.ts, "h"),
+            np.datetime64(cfg.domain.from_to[0]),
+            np.datetime64(cfg.domain.from_to[1]),
+            np.timedelta64(cfg.domain.ts, "h"),
         )
 
         # dataset writer:
         self.zarr_path = self.out_path / f"{self.dataset_name}.zarr"
-        self.time_chunk = cfg.preprocessing.time_chunk
+        self.time_chunk = cfg.domain.time_chunk
         if dry_run:
             # no need to initialize ZarrDataWriter. skip creating/opening Zarr fole on disk
             return
@@ -184,8 +184,8 @@ class HBMPreProcessing:
             variable_names= self.variable_names,
             target_grid= self.target_grid,
             variable_attrs= self.variable_attrs,
-            time_chunk=cfg.preprocessing.time_chunk,
-            clevel=cfg.preprocessing.clevel,
+            time_chunk=cfg.domain.time_chunk,
+            clevel=cfg.domain.clevel,
         )
 
     def report(self):

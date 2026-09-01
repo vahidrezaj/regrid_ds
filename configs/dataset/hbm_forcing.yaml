@@ -33,5 +33,5 @@ pair_vars_list:
   - [var33, var34]
 
 reader_fn:
-  _target_: hbm_prep.io_functions.read_nc
+  _target_: io_functions.read_nc
   _partial_: true
