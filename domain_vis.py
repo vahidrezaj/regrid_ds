@@ -17,7 +17,7 @@ matplotlib.use("Agg")  # no display
 import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
 
-from hbm_prep.grid_interp import create_local_metric_grid, regridding_fn
+from hbm_prep.grid_interp import RegridPipeline, create_local_metric_grid
 
 
 load_dotenv()
@@ -47,7 +47,7 @@ def _apply_variable_attrs(ds, variable_attrs):
 
 
 def _raw_slice(ds, var, mask):
-    ''' mirror regridding_fn's per-source time/depth selection, before regridding '''
+    ''' mirror RegridPipeline's per-source time/depth selection, before regridding '''
     da = ds[var]
     if mask is None:
         return da
@@ -144,18 +144,23 @@ def main(cfg: DictConfig):
     static = bool(cfg.dataset.get("static", False))
     use_mask = bool(cfg.dataset.get("use_mask", True))
 
+    regrid_pipeline = RegridPipeline(
+        target_grid=target_grid,
+        variable_names=variable_names,
+        interp_method=_to_plain(cfg.dataset.interp_method),
+        extrap_method=_to_plain(cfg.dataset.extrap_method),
+        pair_vars_list=pair_vars_list,
+        use_mask=use_mask,
+    )
+
     if static:
         mask = None
-        ds = regridding_fn(ds_list, target_grid, variable_names, None,
-                            cfg.dataset.interp_method, cfg.dataset.extrap_method, pair_vars_list,
-                            use_mask)
+        ds = regrid_pipeline(ds_list, None)
     else:
         mask = np.zeros(ds_list[0].sizes["time"], dtype=bool)
         i = random.randrange(len(mask)) # random timestamp
         mask[i] = True
-        ds = regridding_fn(ds_list, target_grid, variable_names, mask,
-                            cfg.dataset.interp_method, cfg.dataset.extrap_method, pair_vars_list,
-                            use_mask)
+        ds = regrid_pipeline(ds_list, mask)
 
     ds = _apply_variable_attrs(ds, _to_plain(cfg.dataset.get("variable_attrs", None)))
 

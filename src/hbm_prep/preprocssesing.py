@@ -12,7 +12,7 @@ from hydra.utils import instantiate
 from omegaconf import OmegaConf
 import numpy as np
 
-from hbm_prep.grid_interp import create_local_metric_grid, regridding_fn
+from hbm_prep.grid_interp import RegridPipeline, create_local_metric_grid
 from hbm_prep.io_functions import ZarrDataWriter, save_static_npz
 
 logger = logging.getLogger(__name__)
@@ -44,9 +44,9 @@ class HBMPreProcessing:
         - `dataset.variable_names` : source variable names to read/regrid.
         - `dataset.variable_attrs` : optional per-variable rename/attrs override,
           forwarded to `ZarrDataWriter`.
-        - `dataset.interp_method` / `dataset.extrap_method` : passed to `regridding_fn`.
+        - `dataset.interp_method` / `dataset.extrap_method` : passed to `RegridPipeline`.
         - `dataset.pair_vars_list` : optional list of `[u, v]` variable-name pairs that
-          need rotation-aware regridding, passed to `regridding_fn`.
+          need rotation-aware regridding, passed to `RegridPipeline`.
         - `dataset.reader_fn` : a `_partial_: true` target instantiated into `loader_fn`,
           called with a list of file paths (one per region) and returning a matching
           list of opened datasets.
@@ -86,7 +86,7 @@ class HBMPreProcessing:
     Call
     ----
     For time-series datasets, `__call__()` runs the full loop: for each row of files
-    still queued (in priority order, per `regridding_fn`), read and regrid the ones
+    still queued (in priority order, per `RegridPipeline`), read and regrid the ones
     falling inside `time_vector`, write them to the Zarr store, then update/delete the
     checkpoint. Safe to call again on an already-completed instance (no-op, since its
     checkpoint file is gone).
@@ -149,10 +149,15 @@ class HBMPreProcessing:
         # file reader function:
         self.loader_fn = instantiate(cfg.dataset.reader_fn)
 
-        self.interp_method = _to_plain(cfg.dataset.interp_method)
-        self.extrap_method = _to_plain(cfg.dataset.extrap_method)
-        self.pair_vars_list = _to_plain(cfg.dataset.get("pair_vars_list", []))
-        self.use_mask = bool(cfg.dataset.get("use_mask", True))
+        # regrid pipeline: caches per-region xesmf regridders/masks
+        self.regrid_pipeline = RegridPipeline(
+            target_grid=self.target_grid,
+            variable_names=self.variable_names,
+            interp_method=_to_plain(cfg.dataset.interp_method),
+            extrap_method=_to_plain(cfg.dataset.extrap_method),
+            pair_vars_list=_to_plain(cfg.dataset.get("pair_vars_list", [])),
+            use_mask=bool(cfg.dataset.get("use_mask", True)),
+        )
 
         if self.static:
             # no time axis: one-shot regrid, saved as .npz (see _process_static)
@@ -268,16 +273,7 @@ class HBMPreProcessing:
                 continue
 
             # regridding into the target grid:
-            ds = regridding_fn(
-                ds_list,
-                self.target_grid,
-                self.variable_names,
-                time_mask,
-                self.interp_method,
-                self.extrap_method,
-                self.pair_vars_list,
-                self.use_mask,
-            )
+            ds = self.regrid_pipeline(ds_list, time_mask)
             regrid_time = monotonic()
 
             # write Zarr dataset:
@@ -328,16 +324,7 @@ class HBMPreProcessing:
         files = [row[0] for row in self.avail_files]
         ds_list = self.loader_fn(files)
 
-        ds = regridding_fn(
-            ds_list,
-            self.target_grid,
-            self.variable_names,
-            None,
-            self.interp_method,
-            self.extrap_method,
-            self.pair_vars_list,
-            self.use_mask,
-        )
+        ds = self.regrid_pipeline(ds_list, None)
 
         arrays = {
             self._store_name(var): np.asarray(ds[var].values)
