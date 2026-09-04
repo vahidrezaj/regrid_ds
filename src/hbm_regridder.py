@@ -62,6 +62,11 @@ class HBMPreProcessing:
           (`data_path.glob(prefix + "*" + file_ext)`, sorted); a missing entry or
           `null` falls back to a single unprefixed queue. Queues are advanced in
           lockstep, so all regions must have equal file counts.
+        - `domain.file_range` : optional `[start, end]` filenames (inclusive) to slice
+          each region's queue to before processing, saving reads on files outside the
+          range of interest. Matched by name against the first region only, same slice
+          applied to every region. Either bound may be `null` to leave that end open;
+          a missing/typo'd bound behaves the same way -- see `_apply_file_range`.
         - `domain.domain_size` / `grid_size` / `lat_0` / `lon_0` : passed to
           `create_local_metric_grid` to build the target grid.
         - `domain.from_to` / `ts` : start/end timestamps and step (hours) defining
@@ -117,9 +122,18 @@ class HBMPreProcessing:
         if not self.static and self.cp_path.exists():
             with self.cp_path.open("r", encoding="utf-8") as f:
                 self.avail_files = [[Path(p) for p in row] for row in json.load(f)]
+            logger.info(
+                "[%s] resuming from checkpoint: %d file(s) remaining",
+                self.dataset_name, len(self.avail_files[0]) if self.avail_files[0] else 0,
+            )
 
         prefixes = _to_plain(cfg.domain.file_prefix.get(self.dataset_name)) or [""]
         fresh_files = [sorted(self.data_path.glob(pref + "*" + file_ext)) for pref in prefixes]
+
+        file_range = _to_plain(cfg.domain.get("file_range", None))
+        if not self.static and file_range and fresh_files and fresh_files[0]:
+            fresh_files = self._apply_file_range(fresh_files, file_range)
+
         # original queue length, for reporting progress when resuming from a checkpoint
         self.total_files_all = len(fresh_files[0]) if fresh_files and fresh_files[0] else 0
 
@@ -307,6 +321,22 @@ class HBMPreProcessing:
             "[%s] completed: %d files processed in %s",
             self.dataset_name, processed, _fmt_duration(monotonic() - start_time),
         )
+
+    def _apply_file_range(self, fresh_files, file_range):
+        ''' slice every region's file queue to the [start, end] window found by name in the first 
+        region (files are assumed pre-sorted by date). Both bounds are inclusive and `null` leaves
+        that end of the window open'''
+        start, end = file_range
+        names = [p.name for p in fresh_files[0]]
+        total = len(names)
+        start_idx = names.index(start) if start in names else 0
+        end_idx = names.index(end) if end in names else total - 1
+        sliced = [row[start_idx:end_idx + 1] for row in fresh_files] # // both sides inclusive
+        logger.info(
+            "[%s] file_range: %s -> %s (%d/%d files)",
+            self.dataset_name, sliced[0][0].name, sliced[0][-1].name, len(sliced[0]), total,
+        )
+        return sliced
 
     def _update_cp(self):
         ''' update checkpoint file '''
