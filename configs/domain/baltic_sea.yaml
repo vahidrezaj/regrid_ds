@@ -25,3 +25,5 @@ file_prefix:
   hbm_forcing: null
   hbm_bathymetry: [bsns_005]
 
+# optional pre-filter on the (already sorted-by-date) file queue: [start, end] (inclusive) // see hbm_regridder.py
+file_range: null
