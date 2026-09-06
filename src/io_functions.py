@@ -14,16 +14,44 @@ from pyproj import CRS, Transformer
 from zarr.codecs import BloscCodec
 
 
+def _decode_nonstandard_time(ds, file):
+    '''
+    Some source files use `units: "day as %Y%m%d.%f"` instead (e.g. 20131001.25 ==
+    2013-10-01 06:00), which cause silent gap in downstream by skipping regridding 
+    and saving.
+    No-op when `time` already decoded to datetime64 (the common case).
+    '''
+    time = ds["time"]
+    if np.issubdtype(time.dtype, np.datetime64):
+        return ds
+
+    units = time.attrs.get("units", "")
+    if units != "day as %Y%m%d.%f":
+        raise ValueError(f"{file}: unrecognized/undecoded time units {units!r}")
+
+    raw = np.atleast_1d(time.values).astype(np.float64)
+    day_part = np.floor(raw + 1e-6).astype(np.int64)
+    seconds = np.round((raw - day_part) * 86400).astype(np.int64)
+    decoded = np.array([
+        np.datetime64(f"{d // 10000:04d}-{(d // 100) % 100:02d}-{d % 100:02d}")
+        + np.timedelta64(int(s), "s")
+        for d, s in zip(day_part, seconds)
+    ])
+    return ds.assign_coords(time=("time", decoded))
+
+
 def read_nc(files:list) -> list:
     '''
     Read nc files
-    
+
     Returns : list of loaded ds 
     '''
     # load ds
     ds_list = []
     for file in files:
-        ds_list.append(xr.open_dataset(file))
+        ds = xr.open_dataset(file)
+        ds = _decode_nonstandard_time(ds, file)
+        ds_list.append(ds)
 
     # check time files:
     if len(ds_list) > 1:
