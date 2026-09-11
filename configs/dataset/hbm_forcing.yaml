@@ -1,6 +1,6 @@
 name: hbm_forcing
 
-folder: winds_extract
+folder: "H:/dmi/winds_extract"
 variable_names: [var1, var11, var33, var34]
 
 # Optional new names/attrs: 

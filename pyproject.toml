@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "data-preproc"
 version = "0.1.0"
-description = "Preprocessing pipelines that convert ocean state and atmospheric forcing NetCDF data (per data source, e.g. hbm_regridder.py, a future nemo_regridder.py, ...) into .pt/.h5 tensors ready for ODyNO model training"
+description = "Preprocessing pipelines that convert ocean state and atmospheric forcing NetCDF data (dataset-agnostic regridder.py, plus a per-source reader, e.g. io_functions.read_nc for plain NetCDF sources, nemo_reader.py for NEMO's curvilinear grid, ...) into .pt/.h5 tensors ready for ODyNO model training"
 requires-python = ">=3.10"
 authors = [{ name = "vahidreza", email = "jahanmard.vr@gmail.com" }]
 
@@ -21,7 +21,6 @@ dependencies = [
     "pyproj>=3.6",
     "cartopy>=0.23",
     "xgcm>=0.8",
-    "python-dotenv>=1.0",
     "zarr>=3.0",
     "numcodecs>=0.13",
     "matplotlib>=3.7",
@@ -43,7 +42,7 @@ dev = [
 ]
 
 [tool.setuptools]
-py-modules = ["grid_interp", "io_functions", "validate", "hbm_regridder", "lftp_downloader"]
+py-modules = ["grid_interp", "io_functions", "validate", "regridder", "nemo_reader"]
 
 [tool.setuptools.package-dir]
 "" = "src"

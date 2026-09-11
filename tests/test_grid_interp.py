@@ -1,4 +1,5 @@
-'''Tests for RegridPipeline, _rotate_vectors, and RegridPipeline._build_var_groups'''
+'''Tests for RegridPipeline, _rotate_vectors, RegridPipeline._build_var_groups,
+and create_local_metric_grid's alpha_deg rotation'''
 
 import numpy as np
 import pytest
@@ -65,6 +66,69 @@ def _build_pipeline(
         extrap_method=extrap_method,
         pair_vars_list=pair_vars_list or [],
         use_mask=use_mask,
+    )
+
+
+# ---- create_local_metric_grid / alpha_deg ---------------------------------
+
+def test_alpha_deg_zero_matches_omitted_default():
+    with_zero = create_local_metric_grid(
+        domain_size_km=600, grid_size=7, lat_0=LAT_0, lon_0=LON_0, alpha_deg=0.0,
+    )
+    omitted = _target_grid()
+
+    assert np.array_equal(with_zero["lat"], omitted["lat"])
+    assert np.array_equal(with_zero["lon"], omitted["lon"])
+    assert np.allclose(with_zero["cos_g"].values, omitted["cos_g"].values)
+    assert np.allclose(with_zero["sin_g"].values, omitted["sin_g"].values)
+
+
+def test_alpha_deg_rotates_grid_coordinates_correctly():
+    ''' a rotated grid's nominal (x, y) point should land at the same lon/lat as
+    manually rotating the coordinates into the AEQD-native frame and calling the
+    existing (unrotated) transform directly -- an independent check of the
+    rotation direction/sign, not just a self-consistency check. '''
+    from pyproj import CRS, Transformer  # pylint: disable=import-outside-toplevel
+
+    alpha_deg = 37.0
+    alpha = np.deg2rad(alpha_deg)
+    domain_size_km, grid_size = 600, 7
+
+    grid = create_local_metric_grid(
+        domain_size_km=domain_size_km, grid_size=grid_size,
+        lat_0=LAT_0, lon_0=LON_0, alpha_deg=alpha_deg,
+    )
+
+    # a non-center, non-edge nominal grid point
+    iy, ix = 5, 2
+    x, y = grid["x"][ix], grid["y"][iy]
+
+    x_native = x * np.cos(alpha) + y * np.sin(alpha)
+    y_native = -x * np.sin(alpha) + y * np.cos(alpha)
+
+    proj_crs = CRS.from_proj4(f"+proj=aeqd +lat_0={LAT_0} +lon_0={LON_0} +datum=WGS84 +units=m")
+    inv = Transformer.from_crs(proj_crs, CRS.from_epsg(4326), always_xy=True)
+    lon_expected, lat_expected = inv.transform(x_native, y_native)
+
+    assert np.isclose(grid["lon"][iy, ix], lon_expected)
+    assert np.isclose(grid["lat"][iy, ix], lat_expected)
+
+
+def test_alpha_deg_shifts_cos_sin_at_center_exactly():
+    ''' at the exact grid center, meridian convergence is 0, so cos_g/sin_g there
+    should equal cos(alpha)/sin(alpha) exactly -- a tight, unambiguous sign check. '''
+    alpha_deg = 15.0
+    grid_size = 7  # odd -> an exact center point exists
+    grid = create_local_metric_grid(
+        domain_size_km=600, grid_size=grid_size, lat_0=LAT_0, lon_0=LON_0, alpha_deg=alpha_deg,
+    )
+    center = grid_size // 2
+
+    assert np.isclose(
+        grid["cos_g"].values[center, center], np.cos(np.deg2rad(alpha_deg)), atol=1e-6,
+    )
+    assert np.isclose(
+        grid["sin_g"].values[center, center], np.sin(np.deg2rad(alpha_deg)), atol=1e-6,
     )
 
 

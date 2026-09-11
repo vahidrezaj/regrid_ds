@@ -1,13 +1,15 @@
 '''
-HBM Preprocessing class
+Dataset-agnostic read -> regrid -> write preprocessing class. Source-specific logic
+(HBM, NEMO, ...) lives entirely in each source's `dataset.reader_fn`.
 '''
 
 from pathlib import Path
-from datetime import timedelta
+from datetime import date, timedelta
 from time import monotonic
 import json
 import logging
 import os
+
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 import numpy as np
@@ -28,12 +30,14 @@ def _fmt_duration(seconds):
     return str(timedelta(seconds=int(seconds)))
 
 
-class HBMPreProcessing:
+class PreProcessing:
     '''
     Read NetCDF source files, regrid them onto a common target grid, and write the
-    result to a Zarr store, one source file (or one row of paired regional files) at a
-    time. Progress is checkpointed to disk after every file so a crashed or interrupted
-    run can be resumed by re-instantiating with the same config instead of starting over.
+    result to a Zarr store, one source file (or one row of paired queued files -- see
+    `domain.file_match`, whose rows may be geographic regions to mosaic, as for HBM,
+    or per-variable files to merge into one dataset, as for NEMO) at a time. Progress
+    is checkpointed to disk after every file so a crashed or interrupted run can be
+    resumed by re-instantiating with the same config instead of starting over.
 
     Parameters
     ----------
@@ -51,17 +55,21 @@ class HBMPreProcessing:
           called with a list of file paths (one per region) and returning a matching
           list of opened datasets.
         - `dataset.name` : used to namespace the checkpoint/output file, and to look up
-          this dataset's entry in `domain.file_prefix`.
+          this dataset's entry in `domain.file_match`.
         - `dataset.file_ext` : source file extension to glob for, default `".nc"`.
         - `dataset.static` : bool, default `False`. `True` marks a time-invariant
           source (e.g. a bathymetry raster): no `time_vector`/`ZarrDataWriter`/
           per-file checkpoint, just one regrid, saved to a `.npz` file. See
           `_process_static`.
-        - `domain.file_prefix` : dict of `{dataset_name: [prefix, ...] or null}`.
-          Each prefix becomes one region's file queue
-          (`data_path.glob(prefix + "*" + file_ext)`, sorted); a missing entry or
-          `null` falls back to a single unprefixed queue. Queues are advanced in
-          lockstep, so all regions must have equal file counts.
+        - `domain.file_match` : dict of `{dataset_name: [token, ...] or null}`.
+          Each token becomes one queue of files matching that token anywhere in the
+          filename (`data_path.glob("*" + token + "*" + file_ext)`, sorted); a missing
+          entry or `null` falls back to a single unfiltered queue. Queues are advanced
+          in lockstep (so all rows must have equal file counts) and handed to the
+          reader function together, one file per row per call. What each row *represents*
+          is entirely up to the reader: geographic regions to mosaic (HBM, token is a filename
+          prefix), or per-variable files to merge into one dataset (NEMO, token is a filename
+          suffix before the extension).
         - `domain.file_range` : optional `[start, end]` filenames (inclusive) to slice
           each region's queue to before processing, saving reads on files outside the
           range of interest. Matched by name against the first region only, same slice
@@ -127,8 +135,11 @@ class HBMPreProcessing:
                 self.dataset_name, len(self.avail_files[0]) if self.avail_files[0] else 0,
             )
 
-        prefixes = _to_plain(cfg.domain.file_prefix.get(self.dataset_name)) or [""]
-        fresh_files = [sorted(self.data_path.glob(pref + "*" + file_ext)) for pref in prefixes]
+        tokens = _to_plain(cfg.domain.file_match.get(self.dataset_name)) or [""]
+        fresh_files = [
+            sorted(self.data_path.glob(("*" + tok + "*" if tok else "*") + file_ext))
+            for tok in tokens
+        ]
 
         file_range = _to_plain(cfg.domain.get("file_range", None))
         if not self.static and file_range and fresh_files and fresh_files[0]:
@@ -152,12 +163,14 @@ class HBMPreProcessing:
         self.grid_origin = (cfg.domain.lat_0, cfg.domain.lon_0)
         self.domain_size = cfg.domain.domain_size
         self.grid_size = cfg.domain.grid_size
+        self.alpha_deg = cfg.domain.get("alpha_deg", 0.0)
         self.target_grid = create_local_metric_grid(
             domain_size_km= self.domain_size,
             grid_size= self.grid_size,
             lat_0= self.grid_origin[0],
             lon_0= self.grid_origin[1],
             proj_type= 'aeqd',
+            alpha_deg= self.alpha_deg,
         )
 
         # file reader function:
@@ -242,10 +255,10 @@ class HBMPreProcessing:
         )
         logger.info(
             "[%s] target grid: origin=(lat=%s, lon=%s), domain_size=%skm, "
-            "resolution=%.2fkm (grid_size=%d)",
+            "resolution=%.2fkm (grid_size=%d), alpha_deg=%s",
             self.dataset_name, *self.grid_origin, self.domain_size,
             (self.target_grid['x'][1] - self.target_grid['x'][0]) / 1000,
-            self.grid_size,
+            self.grid_size, self.alpha_deg,
         )
         logger.info(
             "[%s] output: %s (time_chunk=%d)",
@@ -254,9 +267,9 @@ class HBMPreProcessing:
 
     def __call__(self):
         ''' read -> regrid -> write ; static datasets run once, others loop per file '''
-        print('='*60)
-        print(' '*20, f'[{self.dataset_name}]')
-        print('='*60)
+        print('='*80)
+        print(' '*20, f'[{self.dataset_name}] -- {date.today().isoformat()}')
+        print('='*80)
 
         if self.static:
             self._process_static()
@@ -303,9 +316,10 @@ class HBMPreProcessing:
             elapsed = write_time - start_time
             avg = elapsed / processed
             eta = avg * remaining
+            pct = 100 * processed / self.total_files
             logger.info(
-                "[%s] %d/%d done, %d left | %s | %.1fmin (avg %.1fs/file, elapsed %s, ETA %s)",
-                self.dataset_name, processed, self.total_files, remaining,
+                "[%s] %04.1f%% done, %d left | %s | %.1fmin (avg %.1fs/file, elapsed %s, ETA %s)",
+                self.dataset_name, pct, remaining,
                 ", ".join(f.name for f in files), (write_time - iter_start)/60,
                 avg, _fmt_duration(elapsed), _fmt_duration(eta),
             )
