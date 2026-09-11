@@ -14,7 +14,7 @@ import numpy as np
 import xarray as xr
 
 from grid_interp import create_local_metric_grid
-from hbm_regridder import _to_plain
+from regridder import _to_plain
 
 logger = logging.getLogger(__name__)
 

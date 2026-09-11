@@ -15,11 +15,12 @@ def create_local_metric_grid(
         lat_0: float,
         lon_0: float,
         proj_type: str = "aeqd",
+        alpha_deg: float = 0.0,
 ) -> dict:
     """
-    Generate lat/lon coordinates corresponding to an equidistant, uniform Cartesian grid 
+    Generate lat/lon coordinates corresponding to an equidistant, uniform Cartesian grid
     centered dynamically at (lat_0, lon_0).
-    
+
     Parameters
     ----------
     domain_size_km : float
@@ -31,7 +32,13 @@ def create_local_metric_grid(
     proj_type : str
         - 'aeqd' (Azimuthal Equidistant - best for distance/FFT)
         - 'laea' (Equal Area - conserving spatial integral properties of scalar fields).
-    
+    alpha_deg : float, default 0.0
+        Tilt the grid's +y ("up") axis this many degrees clockwise from true north,
+        instead of aligning it to true north. AEQD/LAEA are symmetric around their
+        center, so a rotated grid is just as valid as an unrotated one. Useful for
+        boxing a tilted source domain more tightly, with less wasted (NaN) area.
+        `alpha_deg=0.0` (default) is the original, unrotated grid.
+
     Return:
     ----------
     lat, lon, y, x, cos_g, sin_g, lon_grid_b, lat_grid_b
@@ -40,10 +47,13 @@ def create_local_metric_grid(
     ----------
     `cos_g`/`sin_g` are exact only at (lat_0, lon_0); AEQD/LAEA aren't conformal off-center,
     so vector rotation is rotation-only (no shear/scale correction). Verified negligible up
-    to domain_size_km ~1500 (angular error <~0.3 deg); re-check for larger domains.
+    to domain_size_km ~1500 (angular error <~0.3 deg); re-check for larger domains. `alpha_deg`
+    doesn't change this. It's a constant angular offset, not a new source of off-center error.
 
     """
     half_domain_m = (domain_size_km * 1000.0) / 2.0
+    alpha_rad = np.deg2rad(alpha_deg)
+    cos_a, sin_a = np.cos(alpha_rad), np.sin(alpha_rad)
 
     # Define dynamic projection centered on window
     proj_crs = CRS.from_proj4(
@@ -71,14 +81,23 @@ def create_local_metric_grid(
     # 2-D corner coordinates
     xx_b, yy_b = np.meshgrid(axis_b, axis_b)
 
+    # Rotate nominal grid coordinates into the AEQD projection's own native
+    # (unrotated) frame before inverse-transforming; identity when alpha_deg=0
+    x_native = x_mg * cos_a + y_mg * sin_a
+    y_native = -x_mg * sin_a + y_mg * cos_a
+    xb_native = xx_b * cos_a + yy_b * sin_a
+    yb_native = -xx_b * sin_a + yy_b * cos_a
+
     # Transform grid to lat/lon & extract factors (includes convergence angle gamma)
-    lon_grid, lat_grid = inv.transform(x_mg, y_mg)
-    lon_grid_b, lat_grid_b = inv.transform(xx_b, yy_b)
+    lon_grid, lat_grid = inv.transform(x_native, y_native)
+    lon_grid_b, lat_grid_b = inv.transform(xb_native, yb_native)
 
     # compute convergence angles:
     p = Proj(f"+proj={proj_type} +lat_0={lat_0} +lon_0={lon_0} +datum=WGS84 +units=m")
     factors = p.get_factors(lon_grid, lat_grid)
-    gamma_rad = np.deg2rad(factors.meridian_convergence)
+    # the grid's own rotation adds directly to the (position-dependent) meridian
+    # convergence: alpha is a single constant offset applied uniformly on top of it
+    gamma_rad = np.deg2rad(factors.meridian_convergence) + alpha_rad
 
     # Rotate vectors using standard matrix
     cos_g = np.cos(gamma_rad)
@@ -154,7 +173,7 @@ class RegridPipeline:
     '''
     Regrid and mosaic one or more source datasets onto a target grid, then rotate
     vector variables into the target grid's local basis -- call repeatedly with
-    `ds_list`/`time_mask` (e.g. one call per file in `HBMPreProcessing`'s
+    `ds_list`/`time_mask` (e.g. one call per file in `PreProcessing`'s
     read/regrid/write loop) to get back a mosaiced, regridded, vector-rotated
     `xr.Dataset` each time. Caches per-region xesmf regridders and land/ocean
     masks across those calls instead of rebuilding them every time.

@@ -1,6 +1,6 @@
 name: hbm_bathymetry
 
-folder: bathymetry
+folder: "H:/dmi/bathymetry"
 variable_names: [level]
 
 # Optional new names/attrs:

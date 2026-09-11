@@ -1,18 +1,20 @@
-name: hbm_ocean
+name: nemo_forcing
 
-folder: "H:/dmi/extract_2013-2025_currents"
-variable_names: [elev, uvel, vvel, salt, temp]
+folder: "H:/NordicSeas/ECMWF"
+variable_names: [msl, u10, v10]
 
-# Optional new names/attrs: 
+# Optional new names/attrs:
 variable_attrs: null
 
 # interpolation/extrapolation method(s): a single string or a list of strings with one entry per variable
 interp_method: bilinear
-extrap_method: null
+extrap_method: nearest_s2d
+
+use_mask: false  # ERA5 is a complete global field; NaN (if any) is coverage, not land
 
 # paired vector variables for rotation-aware regridding (from true north/east into the target grid's local basis):
 pair_vars_list:
-  - [uvel, vvel]
+  - [u10, v10]
 
 reader_fn:
   _target_: io_functions.read_nc
