@@ -4,7 +4,7 @@ Tools to take ocean and weather data (currents, winds, water temperature, bathym
 
 ![Baltic Sea HBM ocean temperature, regridded](figures/baltic_sea_hbm_ocean_temp.png)
 
-Built around two data sources so far: the Danish Meteorological Institute's HBM model output for the Baltic Sea, and NEMO (Nordic Seas) ocean output + ERA5 atmospheric forcing. The shared regrid/write/validate machinery is dataset-agnostic -- adding a data source only means adding its own reader (a function like `io_functions.read_nc`, or a small module like `nemo_reader.py` when the source needs extra physics, e.g. unrotating a curvilinear grid's vectors) plus config.
+Built around two data sources so far: the Danish Meteorological Institute's HBM model output for the Baltic Sea, and NEMO (Nordic Seas) ocean output + ERA5 atmospheric forcing. The shared regrid/write/validate machinery is dataset-agnostic -- adding a data source only means adding its own reader (a function like `readers.read_nc`, or a small module like `nemo_reader.py` when the source needs extra physics, e.g. unrotating a curvilinear grid's vectors) plus config.
 
 ## What it does, step by step
 
@@ -65,7 +65,8 @@ ruff check .
 ## Layout
 
 - `src/grid_interp.py` — builds the target grid and does the actual regridding + vector rotation. Not tied to HBM specifically.
-- `src/io_functions.py` — reading source files and writing the Zarr output store. Also not HBM-specific.
+- `src/readers.py` — reading source files (plain NetCDF, GeoTIFF). Dataset-agnostic.
+- `src/writers.py` — writing the Zarr output store / static `.npz` files. Also dataset-agnostic.
 - `src/validate.py` — read-only checks against a finished dataset.
 - `src/regridder.py` — dataset-agnostic file queues, checkpointing, and the main read -> regrid -> write pipeline loop. Source-specific reading (HBM, NEMO, ...) lives in `dataset.reader_fn`.
 - `src/nemo_reader.py` — NEMO curvilinear-grid reader: colocates `ssh`/`ubar`/`vbar` onto a common T-point grid and unrotates `ubar`/`vbar` from grid-relative to true east/north before regridding.

@@ -17,5 +17,5 @@ pair_vars_list:
   - [u10, v10]
 
 reader_fn:
-  _target_: io_functions.read_nc
+  _target_: readers.read_nc
   _partial_: true

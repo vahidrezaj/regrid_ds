@@ -15,7 +15,7 @@ from omegaconf import OmegaConf
 import numpy as np
 
 from grid_interp import RegridPipeline, create_local_metric_grid
-from io_functions import ZarrDataWriter, save_static_npz
+from writers import ZarrDataWriter, save_static_npz
 
 logger = logging.getLogger(__name__)
 
