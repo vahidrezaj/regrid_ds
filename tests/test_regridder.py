@@ -14,7 +14,7 @@ def _make_cfg(folder, tokens, out_path):
             "variable_attrs": None,
             "interp_method": "bilinear",
             "extrap_method": None,
-            "reader_fn": {"_target_": "io_functions.read_nc", "_partial_": True},
+            "reader_fn": {"_target_": "readers.read_nc", "_partial_": True},
         },
         "domain": {
             "file_match": {"test_ds": tokens},
