@@ -41,7 +41,7 @@ def create_local_metric_grid(
 
     Return:
     ----------
-    lat, lon, y, x, cos_g, sin_g, lon_grid_b, lat_grid_b
+    lat, lon, y, x, cos_g, sin_g, lon_grid_b, lat_grid_b, crs, alpha_deg
 
     Limitations
     ----------
@@ -113,6 +113,7 @@ def create_local_metric_grid(
         'lat_b': lat_grid_b,
         'lon_b': lon_grid_b,
         'crs': proj_crs.to_cf(),
+        'alpha_deg': alpha_deg,
     }
     return out
 

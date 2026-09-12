@@ -21,7 +21,8 @@ def save_static_npz(path, arrays: dict, target_grid: dict):
     target_grid : as returned by `create_local_metric_grid`
 
     `crs` (a plain dict from `CRS.to_cf()`) is stashed as a 0-d object array;
-    read it back with `payload["crs"].item()`.
+    read it back with `payload["crs"].item()`. `alpha_ref` (grid rotation, degrees)
+    is only added when the grid is actually rotated -- see `ALPHA_REF_DESCRIPTION`.
     '''
     payload = {
         **arrays,
@@ -31,6 +32,9 @@ def save_static_npz(path, arrays: dict, target_grid: dict):
         "x": np.asarray(target_grid["x"]),
         "crs": np.array(target_grid["crs"], dtype=object),
     }
+    alpha_deg = target_grid.get("alpha_deg", 0.0)
+    if alpha_deg != 0.0:
+        payload["alpha_ref"] = np.asarray(alpha_deg)
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -59,8 +63,9 @@ class ZarrDataWriter:
         Variables expected in each `ds` passed to `write()`, keyed by their *source* name.
     target_grid : dict
         Target grid, as returned by `create_local_metric_grid`: 'lat', 'lon' (2-D, shape (y, x)),
-        'y', 'x' (1-D projected coords, metres), and 'crs' (CF grid-mapping attrs dict from
-        `CRS.to_cf()`).
+        'y', 'x' (1-D projected coords, metres), 'crs' (CF grid-mapping attrs dict from
+        `CRS.to_cf()`), and 'alpha_deg' (grid rotation -- saved as a separate 'alpha_ref'
+        variable, only when non-zero; see `ALPHA_REF_DESCRIPTION`).
     variable_attrs : dict, optional
         `{source_name: {"name": store_name, "units": ..., ...}}`. When a source variable has an
         entry here, its data is stored under `store_name` instead of `source_name`, and these
@@ -155,6 +160,23 @@ class ZarrDataWriter:
                         f"CRS origin mismatch with existing store at {self.zarr_path}: "
                         f"{key}={new_crs.get(key)!r} vs stored {existing_crs.get(key)!r}"
                     )
+
+            new_alpha = self.grid.get('alpha_deg', 0.0)
+            existing_alpha = float(existing["alpha_ref"].values) if "alpha_ref" in existing else 0.0
+            if not np.isclose(existing_alpha, new_alpha):
+                raise ValueError(
+                    f"alpha_deg mismatch with existing store at {self.zarr_path}: "
+                    f"{new_alpha!r} vs stored {existing_alpha!r}"
+                )
+
+            # CRS origin/alpha_deg alone still doesn't capture domain_size/grid_size drift
+            # Compare the actual coordinate arrays too
+            if not (np.allclose(existing["lat"].values, self.grid["lat"], atol=1e-6)
+                    and np.allclose(existing["lon"].values, self.grid["lon"], atol=1e-6)):
+                raise ValueError(
+                    f"lat/lon grid mismatch with existing store at {self.zarr_path} "
+                    "(domain_size/grid_size may have changed)"
+                )
         finally:
             existing.close()
 
@@ -185,6 +207,22 @@ class ZarrDataWriter:
             # CF grid-mapping variable: dummy scalar value, real content is attrs
             "spatial_ref": ((), 0, self.grid['crs']),
         }
+
+        alpha_deg = self.grid.get('alpha_deg', 0.0)
+        if alpha_deg != 0.0:
+            alpha_ref_desc = (
+                "Clockwise rotation (in degrees) of the grid's local +y axis from true north "
+                "(see alpha_deg in grid_interp.py). Only present when the grid is rotated; its "
+                "absence means +y aligns with true north. Note: spatial_ref describes the "
+                "unrotated projection and does not account for this rotation. Always use the "
+                "explicit 2D lat/lon arrays for geolocation."
+            )
+            # only saved when the grid is actually rotated
+            coords["alpha_ref"] = ((), alpha_deg, {
+                "long_name": "grid rotation angle",
+                "units": "degrees",
+                "description": alpha_ref_desc,
+            })
 
         ds = xr.Dataset(coords=coords, attrs={"Conventions": "CF-1.8"})
 

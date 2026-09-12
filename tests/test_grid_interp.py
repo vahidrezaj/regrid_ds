@@ -114,6 +114,16 @@ def test_alpha_deg_rotates_grid_coordinates_correctly():
     assert np.isclose(grid["lat"][iy, ix], lat_expected)
 
 
+def test_alpha_deg_is_carried_through_in_returned_grid():
+    ''' writers.py stashes this on `spatial_ref` as a discoverable (non-standard)
+    attr, so it must round-trip through the returned dict unchanged. '''
+    grid = create_local_metric_grid(
+        domain_size_km=600, grid_size=7, lat_0=LAT_0, lon_0=LON_0, alpha_deg=8.5,
+    )
+    assert grid["alpha_deg"] == 8.5
+    assert _target_grid()["alpha_deg"] == 0.0
+
+
 def test_alpha_deg_shifts_cos_sin_at_center_exactly():
     ''' at the exact grid center, meridian convergence is 0, so cos_g/sin_g there
     should equal cos(alpha)/sin(alpha) exactly -- a tight, unambiguous sign check. '''

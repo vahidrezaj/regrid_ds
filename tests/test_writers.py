@@ -5,7 +5,7 @@ import pytest
 import xarray as xr
 from pyproj import CRS
 
-from writers import ZarrDataWriter, save_static_npz
+from writers import ALPHA_REF_DESCRIPTION, ZarrDataWriter, save_static_npz
 
 
 @pytest.fixture
@@ -86,6 +86,10 @@ def test_write_and_gaps(tmp_path, target_grid, time_vector):
     crs = CRS.from_cf(ds["spatial_ref"].attrs)
     assert crs.to_cf()["grid_mapping_name"] == "azimuthal_equidistant"
     assert ds["sst"].attrs["grid_mapping"] == "spatial_ref"
+
+    # alpha_ref (grid rotation) is only saved when the grid is actually rotated --
+    # target_grid here has no "alpha_deg" key (defaults to 0.0), so it must be absent
+    assert "alpha_ref" not in ds.coords
 
     ds.close()
 
@@ -211,6 +215,71 @@ def test_reopen_validates_configuration(tmp_path, target_grid, time_vector):
             time_chunk=4,
         )
 
+    # reopening with the same CRS origin but a different lat/lon grid (e.g. alpha_deg
+    # changed between runs, which CRS origin alone can't detect -- see grid_interp.py)
+    # should also raise
+    rotated_grid = dict(target_grid)
+    rotated_grid["lat"] = target_grid["lat"] + 5.0
+    with pytest.raises(ValueError):
+        ZarrDataWriter(
+            zarr_path=str(zarr_path),
+            time_vector=time_vector,
+            variable_names=variable_names,
+            target_grid=rotated_grid,
+            time_chunk=4,
+        )
+
+
+def test_alpha_ref_saved_only_when_rotated(tmp_path, target_grid, time_vector):
+    zarr_path = tmp_path / "test.zarr"
+    variable_names = ["sst"]
+
+    rotated_grid = dict(target_grid)
+    rotated_grid["alpha_deg"] = 12.5
+    writer = ZarrDataWriter(
+        zarr_path=str(zarr_path),
+        time_vector=time_vector,
+        variable_names=variable_names,
+        target_grid=rotated_grid,
+        time_chunk=4,
+    )
+    writer.close()
+
+    ds = xr.open_zarr(str(zarr_path), consolidated=True)
+    assert "alpha_ref" in ds.coords
+    assert float(ds["alpha_ref"].values) == 12.5
+    assert ds["alpha_ref"].attrs["description"] == ALPHA_REF_DESCRIPTION
+    ds.close()
+
+
+def test_reopen_detects_alpha_deg_mismatch(tmp_path, target_grid, time_vector):
+    ''' alpha_deg mismatch gets its own specific error message, distinct from the generic
+    lat/lon-mismatch fallback (both ultimately guard against the same kind of drift) '''
+    zarr_path = tmp_path / "test.zarr"
+    variable_names = ["sst"]
+
+    rotated_grid = dict(target_grid)
+    rotated_grid["alpha_deg"] = 12.5
+    writer = ZarrDataWriter(
+        zarr_path=str(zarr_path),
+        time_vector=time_vector,
+        variable_names=variable_names,
+        target_grid=rotated_grid,
+        time_chunk=4,
+    )
+    writer.close()
+
+    # target_grid itself has no "alpha_deg" key -> defaults to 0.0, which mismatches
+    # the 12.5 stored above
+    with pytest.raises(ValueError, match="alpha_deg"):
+        ZarrDataWriter(
+            zarr_path=str(zarr_path),
+            time_vector=time_vector,
+            variable_names=variable_names,
+            target_grid=target_grid,
+            time_chunk=4,
+        )
+
 
 def test_write_renames_and_overrides_attrs(tmp_path, target_grid, time_vector):
     zarr_path = tmp_path / "test.zarr"
@@ -277,3 +346,17 @@ def test_save_static_npz(tmp_path, target_grid):
     assert np.allclose(payload["lat"], target_grid["lat"])
     assert np.allclose(payload["lon"], target_grid["lon"])
     assert payload["crs"].item() == target_grid["crs"]
+    # target_grid fixture has no "alpha_deg" key -> alpha_ref must be absent, not 0.0
+    assert "alpha_ref" not in payload.files
+
+
+def test_save_static_npz_includes_alpha_ref_when_rotated(tmp_path, target_grid):
+    npz_path = tmp_path / "nemo.npz"
+    level = np.arange(target_grid["lat"].size, dtype=np.float32).reshape(target_grid["lat"].shape)
+    rotated_grid = dict(target_grid)
+    rotated_grid["alpha_deg"] = 12.5
+
+    save_static_npz(npz_path, {"level": level}, rotated_grid)
+
+    payload = np.load(npz_path, allow_pickle=True)
+    assert payload["alpha_ref"] == 12.5
