@@ -204,14 +204,19 @@ class NemoOceanReader:
         # NaN land T-point
         merged = merged.where(self._ocean_mask)
 
+        # domain_cfg's top_level-derived mask to use in _create_masks
+        merged["source_mask"] = self._ocean_mask
+
         return [merged]
 
 
 def read_nemo_bathymetry(files, variable_name="bathy_metry"):
     '''
     Read static bathymetry from a NEMO domain_cfg.nc's T-point `bathy_metry`,
-    masking land (`top_level == 0`) to NaN. Matches the read_nc/read_tif
-    reader_fn contract (`dataset.static: true`, so this is called once).
+    masking land (`top_level == 0`) to NaN, and attaches the same `top_level`-
+    derived `source_mask` as `NemoOceanReader` for `RegridPipeline._region_masks`
+    to use as-is. Matches the read_nc/read_tif reader_fn contract
+    (`dataset.static: true`, so this is called once).
 
     Parameters
     ----------
@@ -226,9 +231,13 @@ def read_nemo_bathymetry(files, variable_name="bathy_metry"):
     '''
     [file] = files
     with xr.open_dataset(file) as domain_cfg:
-        depth = domain_cfg[variable_name].where(domain_cfg["top_level"] > 0)
+        ocean_mask = domain_cfg["top_level"] > 0
+        depth = domain_cfg[variable_name].where(ocean_mask)
         ds = xr.Dataset(
-            {variable_name: (("y", "x"), depth.values)},
+            {
+                variable_name: (("y", "x"), depth.values),
+                "source_mask": (("y", "x"), ocean_mask.values),
+            },
             coords={
                 "lat": (("y", "x"), domain_cfg["gphit"].values),
                 "lon": (("y", "x"), domain_cfg["glamt"].values),

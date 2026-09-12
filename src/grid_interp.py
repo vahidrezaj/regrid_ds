@@ -118,38 +118,45 @@ def create_local_metric_grid(
     return out
 
 
-def _create_masks(use_mask, sample_array, target_grid, thrd_ocean_fraction=0.5):
+def _create_masks(use_mask, sample_array, target_grid, thrd_ocean_fraction=0.5, source_mask=None):
     '''
-    Create source and target mask from `var_name` variable.
-    If the variable doesn't contain NaN values, the function returns None
+    Create source and target mask, either derived from NaN values in `sample_array`
+    or, if `source_mask` is given, from that mask directly (used as-is, regardless of
+    whether `sample_array` itself contains NaN -- e.g. NEMO's `top_level`-derived
+    ocean mask is more reliable than `ssh`/`ubar`/`vbar`'s own NaN pattern, see
+    `nemo_reader.py`). If neither yields a mask, the function returns None.
 
     Returns: source_mask, target_mask
     '''
-    if use_mask and sample_array.isnull().any():
-        ds_source = sample_array.to_dataset(name="var")
+    if not use_mask:
+        return None, None
 
-        ds_target = xr.Dataset(
-            coords={
-                "lat": (("y", "x"), target_grid['lat']),
-                "lon": (("y", "x"), target_grid['lon']),
-            }
-        )
-        regridder = xe.Regridder(
-            ds_source,
-            ds_target,
-            "bilinear",
-            unmapped_to_nan=True,
-        )
-
+    if source_mask is not None:
+        source_mask = source_mask.astype(float)
+    elif sample_array.isnull().any():
         source_mask = (~sample_array.isnull()).astype(float)
-
-        target_ocean_fraction = regridder(source_mask)
-        target_mask = target_ocean_fraction > thrd_ocean_fraction
-
-        return source_mask.astype(int), target_mask.astype(int)
-
     else:
         return None, None
+
+    ds_source = sample_array.to_dataset(name="var")
+
+    ds_target = xr.Dataset(
+        coords={
+            "lat": (("y", "x"), target_grid['lat']),
+            "lon": (("y", "x"), target_grid['lon']),
+        }
+    )
+    regridder = xe.Regridder(
+        ds_source,
+        ds_target,
+        "bilinear",
+        unmapped_to_nan=True,
+    )
+
+    target_ocean_fraction = regridder(source_mask)
+    target_mask = target_ocean_fraction > thrd_ocean_fraction
+
+    return source_mask.astype(int), target_mask.astype(int)
 
 def _rotate_vectors(ds, pair_vars, target_grid):
     '''
@@ -204,6 +211,14 @@ class RegridPipeline:
         as regridding sources, and forcing `extrap_method` to `None`). Set to
         `False` for sources whose NaNs are just incomplete domain coverage, so
         that `extrap_method` fills the gap instead of being silently disabled.
+
+    Per-call input
+    --------------
+    Each `ds` in `ds_list` may optionally carry a `source_mask` variable; when
+    present, `_region_masks` uses it as the region's land/ocean mask as-is
+    instead of deriving one from NaNs in the first `variable_names` entry (see
+    `_create_masks`). Leave it out for sources where the data's own NaN pattern
+    already is the land/ocean mask.
 
     Notes
     -----
@@ -280,14 +295,23 @@ class RegridPipeline:
         building and caching it by `region_idx` the first time this region is
         seen. Caching assumes each region's land/ocean mask is stable across
         calls -- see class docstring.
+
+        If `ds` carries a `source_mask` variable (added by `reader_fn` for
+        sources where the real land/ocean mask isn't reliably recoverable from
+        data NaNs alone, e.g. NEMO's `top_level`-derived mask), it's used as-is
+        instead of deriving one from NaNs -- see `_create_masks`.
         '''
         if region_idx not in self._masks_cache:
             sample_array = ds[self.variable_names[0]]
             sample_array = (
                 sample_array.isel(time=0) if "time" in sample_array.dims else sample_array
             )
+            source_mask = ds.get("source_mask")
+            if source_mask is not None and "time" in source_mask.dims:
+                source_mask = source_mask.isel(time=0)
             self._masks_cache[region_idx] = _create_masks(
-                self.use_mask, sample_array, self.target_grid, thrd_ocean_fraction=0.5
+                self.use_mask, sample_array, self.target_grid, thrd_ocean_fraction=0.5,
+                source_mask=source_mask,
             )
         return self._masks_cache[region_idx]
 
@@ -381,18 +405,24 @@ class RegridPipeline:
             bathymetry raster): each source is regridded as-is, with no
             time/depth trimming. Otherwise, only the first depth level (if a
             variable is 3-D) and the time steps selected by `time_mask` are kept
-            before regridding.
+            before regridding. Variables with no `time` dim (e.g. an embedded
+            `source_mask`, see `_region_masks`) are left untouched either way.
 
         Returns
         -------
         xr.Dataset
             Mosaiced, regridded dataset on the target grid with vectors rotated.
         '''
+        def _select_time_and_depth(da):
+            if "time" not in da.dims:
+                return da
+            return da[time_mask, 0] if da.ndim > 3 else da[time_mask]
+
         ds_regridded = []
         for region_idx, ds in enumerate(ds_list):
             if time_mask is not None:
                 # select the first depth index, if var is 3D
-                ds = ds.map(lambda da: da[time_mask, 0] if da.ndim > 3 else da[time_mask])
+                ds = ds.map(_select_time_and_depth)
             ds_regridded.append(self._regrid_region(ds, region_idx))
 
         # mosaic regridded regions by priority, if len(ds_regridded)>1

@@ -267,6 +267,32 @@ def test_call_caches_region_mask_and_applies_it_on_every_call():
         assert np.any(np.isclose(values[~np.isnan(values)], value))
 
 
+def test_call_uses_embedded_source_mask_instead_of_data_nans():
+    ''' a `source_mask` variable on `ds` (e.g. nemo_reader.py's domain_cfg-derived
+    ocean mask) must be used as-is, even when the data variable itself has no NaN
+    to derive a mask from -- and, since it carries no "time" dim, must survive
+    __call__'s per-timestep slicing untouched (see _select_time_and_depth). '''
+    target_grid = _target_grid()
+    pipeline = _build_pipeline(["sst"], target_grid=target_grid)
+
+    lats = np.arange(*SOURCE_LAT)
+    lons = np.arange(*SOURCE_LON)
+    lon2d, lat2d = np.meshgrid(lons, lats)
+    land = lat2d < LAT_0  # "land" per source_mask only -- sst itself has no NaN
+
+    ds = xr.Dataset(
+        {"sst": (("time", "j", "i"), np.full((1,) + lat2d.shape, 10.0))},
+        coords={"time": [0], "lat": (("j", "i"), lat2d), "lon": (("j", "i"), lon2d)},
+    )
+    ds["source_mask"] = (("j", "i"), ~land)  # True = ocean, no time dim
+
+    result = pipeline(ds_list=[ds], time_mask=np.array([True]))
+
+    values = result["sst"].values
+    assert np.any(np.isnan(values))  # masked out via source_mask despite sst having no NaN
+    assert np.any(np.isclose(values[~np.isnan(values)], 10.0))
+
+
 def test_call_mosaics_regions_by_priority():
     target_grid = _target_grid()
     pipeline = _build_pipeline(["sst"], target_grid=target_grid)
