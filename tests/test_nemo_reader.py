@@ -182,7 +182,7 @@ def test_nemo_ocean_reader_output_matches_read_nc_contract(tmp_path):
     assert len(ds_list) == 1
     ds = ds_list[0]
 
-    assert set(ds.data_vars) == {"ssh", "ubar", "vbar"}
+    assert set(ds.data_vars) == {"ssh", "ubar", "vbar", "source_mask"}
     assert "time" in ds.coords and "time_counter" not in ds.coords
     assert ds["lat"].dims == ("y", "x")
     assert ds["lon"].dims == ("y", "x")
@@ -263,6 +263,10 @@ def test_nemo_ocean_reader_masks_land_and_avoids_colocation_contamination(tmp_pa
     # ssh at ocean columns passes through unaffected
     assert np.allclose(ds["ssh"].values[0, :, 1:], [[1.5, 2.5], [3.5, 4.5]])
 
+    # embedded source_mask is domain_cfg's top_level directly, not derived
+    # from any variable's own NaN pattern -- see grid_interp._create_masks
+    assert np.array_equal(ds["source_mask"].values, top_level.astype(bool))
+
 
 def test_nemo_ocean_reader_accepts_ssh_only(tmp_path):
     domain_cfg_path, files = _synthetic_files(tmp_path)
@@ -271,7 +275,7 @@ def test_nemo_ocean_reader_accepts_ssh_only(tmp_path):
     reader = NemoOceanReader(domain_cfg_path, ssh_var="ssh", u_var="ubar", v_var="vbar")
     ds = reader([ssh_path])[0]
 
-    assert set(ds.data_vars) == {"ssh"}
+    assert set(ds.data_vars) == {"ssh", "source_mask"}
     assert "time" in ds.coords
 
 
@@ -282,7 +286,7 @@ def test_nemo_ocean_reader_accepts_uv_only(tmp_path):
     reader = NemoOceanReader(domain_cfg_path, ssh_var="ssh", u_var="ubar", v_var="vbar")
     ds = reader([u_path, v_path])[0]  # order shouldn't matter -- matched by name, not position
 
-    assert set(ds.data_vars) == {"ubar", "vbar"}
+    assert set(ds.data_vars) == {"ubar", "vbar", "source_mask"}
 
 
 def test_nemo_ocean_reader_rejects_unpaired_u_without_v(tmp_path):
