@@ -1,7 +1,7 @@
 name: nemo_ocean
 
 folder: "H:/NordicSeas/ocean"
-variable_names: [ssh, ubar, vbar]
+variable_names: [ssh] # [ssh, ubar, vbar]
 
 # Optional new names/attrs:
 variable_attrs: null
@@ -13,8 +13,8 @@ extrap_method: nearest_s2d
 use_mask: true  # NaN in ssh/ubar/vbar is a real land mask
 
 # paired vector variables for rotation-aware regridding (from true north/east into the target grid's local basis):
-pair_vars_list:
-  - [ubar, vbar]
+# pair_vars_list:
+#   - [ubar, vbar]
 
 reader_fn:
   _target_: nemo_reader.NemoOceanReader
