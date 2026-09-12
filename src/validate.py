@@ -41,6 +41,7 @@ def _target_grid(cfg):
         lat_0=cfg.domain.lat_0,
         lon_0=cfg.domain.lon_0,
         proj_type="aeqd",
+        alpha_deg=cfg.domain.get("alpha_deg", 0.0),
     )
 
 
@@ -190,10 +191,12 @@ def validate_npz(cfg, out_path: Path) -> bool:
 
     grid_size = cfg.domain.grid_size
     expected_keys = set(expected_vars) | {"lat", "lon", "y", "x", "crs"}
+    # alpha_ref is only saved when the grid is rotated (see writers.py) -- allowed, not required
+    optional_keys = {"alpha_ref"}
 
     with np.load(npz_path, allow_pickle=True) as payload:
         missing = expected_keys - set(payload.files)
-        extra = set(payload.files) - expected_keys
+        extra = set(payload.files) - expected_keys - optional_keys
         ok &= _ok(not missing, "no missing arrays (expected %s)", sorted(expected_keys))
         if extra:
             _warn("unexpected extra array(s) in file: %s", sorted(extra))
