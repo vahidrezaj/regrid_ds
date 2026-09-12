@@ -4,6 +4,9 @@ NEMO curvilinear-grid reader.
 Reads ssh/ubar/vbar, unrotates ubar/vbar from the model's own grid-relative
 (i,j) axes to true east/north, colocates everything onto T-points, and NaNs
 land cells. Output is ready for the regridder.py / grid_interp.py pipeline.
+
+Also holds `read_nemo_bathymetry`, for the static `bathy_metry` field in the
+same domain_cfg.nc used above for glamt/gphit/glamv/gphiv.
 '''
 
 from pathlib import Path
@@ -202,3 +205,33 @@ class NemoOceanReader:
         merged = merged.where(self._ocean_mask)
 
         return [merged]
+
+
+def read_nemo_bathymetry(files, variable_name="bathy_metry"):
+    '''
+    Read static bathymetry from a NEMO domain_cfg.nc's T-point `bathy_metry`,
+    masking land (`top_level == 0`) to NaN. Matches the read_nc/read_tif
+    reader_fn contract (`dataset.static: true`, so this is called once).
+
+    Parameters
+    ----------
+    files : list of one path
+        The domain_cfg.nc file (see domain.file_match's "domain_cfg" token).
+    variable_name : str
+        Bathymetry variable name in domain_cfg.
+
+    Returns
+    -------
+    list of one xr.Dataset
+    '''
+    [file] = files
+    with xr.open_dataset(file) as domain_cfg:
+        depth = domain_cfg[variable_name].where(domain_cfg["top_level"] > 0)
+        ds = xr.Dataset(
+            {variable_name: (("y", "x"), depth.values)},
+            coords={
+                "lat": (("y", "x"), domain_cfg["gphit"].values),
+                "lon": (("y", "x"), domain_cfg["glamt"].values),
+            },
+        )
+    return [ds]

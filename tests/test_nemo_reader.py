@@ -8,6 +8,7 @@ from nemo_reader import (
     _bearing,
     _to_t_point,
     compute_t_point_angle,
+    read_nemo_bathymetry,
     unrotate_to_geographic,
 )
 
@@ -294,3 +295,34 @@ def test_nemo_ocean_reader_rejects_unpaired_u_without_v(tmp_path):
         assert False, "expected ValueError for ubar given without vbar"
     except ValueError:
         pass
+
+
+# ---- read_nemo_bathymetry ------------------------------------------------
+
+def test_read_nemo_bathymetry_masks_land_and_uses_t_point_coords(tmp_path):
+    ''' land (top_level==0) must end up NaN even though domain_cfg leaves a literal
+    0.0 there, not NaN -- same gap as ssh/ubar/vbar (see NemoOceanReader). '''
+    lat0, lon0 = 60.0, 10.0
+    ny, nx = 2, 3
+    lat = lat0 + 0.1 * np.arange(ny)[:, None] * np.ones((1, nx))
+    lon = lon0 + 0.1 * np.arange(nx)[None, :] * np.ones((ny, 1))
+    top_level = np.array([[0, 1, 1], [0, 1, 1]])  # column 0 = land
+    bathy = np.array([[0.0, 50.0, 100.0], [0.0, 60.0, 120.0]], dtype=np.float32)
+
+    domain_cfg = xr.Dataset({
+        "glamt": (("y", "x"), lon), "gphit": (("y", "x"), lat),
+        "top_level": (("y", "x"), top_level),
+        "bathy_metry": (("y", "x"), bathy),
+    })
+    domain_cfg_path = tmp_path / "domain_cfg.nc"
+    domain_cfg.to_netcdf(domain_cfg_path)
+
+    ds = read_nemo_bathymetry([domain_cfg_path])[0]
+
+    assert set(ds.data_vars) == {"bathy_metry"}
+    assert ds["bathy_metry"].dims == ("y", "x")
+    assert np.array_equal(ds["lat"].values, lat)
+    assert np.array_equal(ds["lon"].values, lon)
+
+    assert np.isnan(ds["bathy_metry"].values[:, 0]).all()  # land column stays NaN
+    assert np.allclose(ds["bathy_metry"].values[:, 1:], bathy[:, 1:])  # ocean unaffected
