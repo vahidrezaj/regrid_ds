@@ -261,3 +261,36 @@ def test_nemo_ocean_reader_masks_land_and_avoids_colocation_contamination(tmp_pa
 
     # ssh at ocean columns passes through unaffected
     assert np.allclose(ds["ssh"].values[0, :, 1:], [[1.5, 2.5], [3.5, 4.5]])
+
+
+def test_nemo_ocean_reader_accepts_ssh_only(tmp_path):
+    domain_cfg_path, files = _synthetic_files(tmp_path)
+    ssh_path = files[0]
+
+    reader = NemoOceanReader(domain_cfg_path, ssh_var="ssh", u_var="ubar", v_var="vbar")
+    ds = reader([ssh_path])[0]
+
+    assert set(ds.data_vars) == {"ssh"}
+    assert "time" in ds.coords
+
+
+def test_nemo_ocean_reader_accepts_uv_only(tmp_path):
+    domain_cfg_path, files = _synthetic_files(tmp_path)
+    _, u_path, v_path = files
+
+    reader = NemoOceanReader(domain_cfg_path, ssh_var="ssh", u_var="ubar", v_var="vbar")
+    ds = reader([u_path, v_path])[0]  # order shouldn't matter -- matched by name, not position
+
+    assert set(ds.data_vars) == {"ubar", "vbar"}
+
+
+def test_nemo_ocean_reader_rejects_unpaired_u_without_v(tmp_path):
+    domain_cfg_path, files = _synthetic_files(tmp_path)
+    _, u_path, _ = files
+
+    reader = NemoOceanReader(domain_cfg_path, ssh_var="ssh", u_var="ubar", v_var="vbar")
+    try:
+        reader([u_path])
+        assert False, "expected ValueError for ubar given without vbar"
+    except ValueError:
+        pass

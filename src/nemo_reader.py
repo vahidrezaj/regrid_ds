@@ -1,27 +1,23 @@
 '''
----> This script is specific to reading a target dataset <---
-NEMO curvilinear-grid reader:
-    1. unrotates `ubar`/`vbar` from the model's own grid-relative (i,j) axes to true east/north
-    2. colocates `ssh`/`ubar`/`vbar` onto a common T-point grid
-    3. NaNs land cells using `domain_cfg`'s `top_level` T-point mask
+NEMO curvilinear-grid reader.
 
-Now, data is ready to pass to the `regridder.py` / `grid_interp.py` pipeline, which expects vector
-variables already expressed in true east/north.
+Reads ssh/ubar/vbar, unrotates ubar/vbar from the model's own grid-relative
+(i,j) axes to true east/north, colocates everything onto T-points, and NaNs
+land cells. Output is ready for the regridder.py / grid_interp.py pipeline.
 '''
+
+from pathlib import Path
 
 import numpy as np
 import xarray as xr
 
-# non-dimension coordinates carried over from the source files that don't apply to the merged
+# leftover source-file coords that don't apply to the merged output
 _SOURCE_COORDS_TO_DROP = ["nav_lat", "nav_lon", "time_centered"]
 
 
 def _bearing(lon1, lat1, lon2, lat2):
-    '''
-    Great-circle initial bearing from (lon1,lat1) to (lon2,lat2), in radians,
-    clockwise from true north (0 = north, pi/2 = east). Inputs in degrees.
-    Vectorized (numpy broadcasting).
-    '''
+    ''' Great-circle bearing from (lon1,lat1) to (lon2,lat2), radians clockwise
+    from true north. Inputs in degrees; vectorized. '''
     lon1, lat1, lon2, lat2 = (np.deg2rad(a) for a in (lon1, lat1, lon2, lat2))
     dlon = lon2 - lon1
     y = np.sin(dlon) * np.cos(lat2)
@@ -31,12 +27,11 @@ def _bearing(lon1, lat1, lon2, lat2):
 
 def compute_t_point_angle(domain_cfg):
     '''
-    Derive NEMO's grid rotation angle at T-points from `domain_cfg`: (gcost, gsint),
-    the cos/sin of the local grid j-axis's compass bearing (from true north), from
-    `glamv`/`gphiv` (V-point) neighbors straddling each T-point in the j-direction
-    (V(j-1,i) south, V(j,i) north); one-sided (single neighbor) at j=0. This is the
-    same coordinate-derived approach NEMO's own `geo2ocean.F90::angle` uses, since
-    the angle isn't stored in `domain_cfg` directly.
+    Grid rotation angle at each T-point: (gcost, gsint), the cos/sin of the
+    local j-axis's compass bearing, from domain_cfg's glamv/gphiv neighbors.
+
+    NOTE: domain_cfg doesn't store this angle directly, so we derive it the
+    same way NEMO's own geo2ocean.F90::angle does, from the same coordinates.
 
     Returns
     -------
@@ -56,13 +51,12 @@ def compute_t_point_angle(domain_cfg):
 
 def _to_t_point(u, v):
     '''
-    Colocate NEMO's U-point `u` and V-point `v` (dims (..., "y", "x")) onto
-    T-points via NaN-aware pairwise averaging along the staggering axis
-    (T(i,j) straddled by U(i-1,j)/U(i,j) in x, and V(i,j-1)/V(i,j) in y) --
-    ignoring whichever neighbor is NaN (land) instead of propagating it, which
-    would otherwise bleed NaN one cell inland from every coastline. One-sided
-    (falls back to the single available neighbor) at the i=0/j=0 edge. Stays
-    lazy/dask-friendly (no `.values`/eager computation).
+    Colocate U-point `u` and V-point `v` onto T-points by averaging each
+    pair of neighbors straddling it (U(i-1,j)/U(i,j) in x, V(i,j-1)/V(i,j)
+    in y). Falls back to the single neighbor at the i=0/j=0 edge.
+
+    NOTE: skips a NaN (land) neighbor instead of averaging it in -- a plain
+    mean would bleed NaN one cell inland from every coastline.
 
     Returns
     -------
@@ -81,20 +75,13 @@ def unrotate_to_geographic(u_i, v_j, gcost, gsint):
     '''
     Convert NEMO's grid-relative (i,j) vector components to true (east,north).
 
-    Derivation: by definition of compass bearing theta_j (clockwise from true
-    north), the local +j-axis unit vector is j_hat = (sin theta_j, cos theta_j)
-    = (gsint, gcost) in (East, North). The grid is orthogonal with the +i axis
-    90 deg clockwise from +j (validated against the real domain_cfg: local
-    grid-i vs grid-j bearings differ by 90 deg to within 0.06 deg std across
-    ~48k ocean points), so i_hat = (sin(theta_j+90), cos(theta_j+90)) =
-    (gcost, -gsint). A vector with grid components (u_i, v_j) is
-    u_i*i_hat + v_j*j_hat, giving:
-        u_east  =  u_i*gcost + v_j*gsint
-        v_north = -u_i*gsint + v_j*gcost
-    This is the matrix transpose of `grid_interp._rotate_vectors` (expected,
-    since that function rotates the opposite direction: true -> local basis).
-    (Re-derived and numerically verified independently rather than trusting a
-    web-fetched paraphrase of NEMO's `geo2ocean.F90` source for the sign.)
+    NOTE: derived from the compass-bearing definition of the local j-axis
+    (j_hat = (gsint, gcost) in East/North) plus the grid's i/j orthogonality
+    (validated against the real domain_cfg to within 0.06 deg). This is the
+    transpose of grid_interp._rotate_vectors, as expected since that function
+    rotates the opposite direction (true -> local). Re-derived and verified
+    independently rather than trusted from a web-fetched paraphrase of NEMO's
+    geo2ocean.F90 source, which had the sign on gsint backwards.
     '''
     u_east = u_i * gcost + v_j * gsint
     v_north = v_j * gcost - u_i * gsint
@@ -103,21 +90,26 @@ def unrotate_to_geographic(u_i, v_j, gcost, gsint):
 
 class NemoOceanReader:
     '''
-    Constructed once by Hydra
+    Constructed once by Hydra.
 
-    Reads one row of paired NEMO ocean files:
-    `ssh` (T-point), `ubar`, `vbar` (U/V-point); see `domain.file_match: nemo_ocean`
-    and returns a single merged dataset with all three variables colocated onto
-    `domain_cfg`'s T-point grid.
-    
-    `ubar`/`vbar` unrotated from grid-relative to true east/north.
-    Matches the `read_nc`/`read_tif` reader_fn contract.
+    Reads one row of NEMO ocean files (ssh and/or ubar/vbar; see
+    domain.file_match.nemo_ocean) and returns one merged dataset, colocated
+    onto domain_cfg's T-point grid. ubar/vbar are unrotated to true
+    east/north. Matches the read_nc/read_tif reader_fn contract.
+
+    Any subset of {ssh, ubar, vbar} works -- e.g. `[ssh]` alone, or
+    `[ubar, vbar]` alone -- just keep dataset.variable_names/pair_vars_list
+    in sync with whatever subset is active.
+
+    NOTE: files are matched to a variable by name, not position, so
+    file_match's token order doesn't matter. ubar/vbar must be given
+    together (or not at all), since rotating one without the other isn't
+    meaningful.
 
     Parameters
     ----------
     domain_cfg_path : str or Path
-        Path to the NEMO `domain_cfg.nc` (or subset thereof) providing
-        `glamt`/`gphit`/`glamv`/`gphiv`.
+        Path to the NEMO domain_cfg.nc providing glamt/gphit/glamv/gphiv.
     ssh_var, u_var, v_var : str
         Variable names as they appear in the source files.
     '''
@@ -145,37 +137,60 @@ class NemoOceanReader:
             self._u_mask = xr.DataArray(u_mask, dims=("y", "x"))
             self._v_mask = xr.DataArray(v_mask, dims=("y", "x"))
 
-    def __call__(self, files):
-        ssh_file, u_file, v_file = files
+    def _match_files(self, files):
+        ''' map each of ssh_var/u_var/v_var to whichever file's name contains it '''
+        file_by_var = {}
+        for var in (self.ssh_var, self.u_var, self.v_var):
+            matches = [f for f in files if var in Path(f).stem]
+            if len(matches) > 1:
+                raise ValueError(f"multiple files match variable {var!r}: {matches}")
+            if matches:
+                file_by_var[var] = matches[0]
 
-        ssh_ds = xr.open_dataset(ssh_file, chunks={})
-        u_ds = xr.open_dataset(u_file, chunks={})
-        v_ds = xr.open_dataset(v_file, chunks={})
-
-        assert u_ds["time_counter"].equals(ssh_ds["time_counter"]) and \
-            v_ds["time_counter"].equals(ssh_ds["time_counter"]), \
-            f"time_counter mismatch across ssh/ubar/vbar files: {files}"
-
-        ssh_da = ssh_ds[self.ssh_var].drop_vars(_SOURCE_COORDS_TO_DROP, errors="ignore")
-        u_da = u_ds[self.u_var].drop_vars(_SOURCE_COORDS_TO_DROP, errors="ignore")
-        v_da = v_ds[self.v_var].drop_vars(_SOURCE_COORDS_TO_DROP, errors="ignore")
-
-        if ssh_da.shape[-2:] != self._lat.shape:
+        unmatched = set(files) - set(file_by_var.values())
+        if unmatched:
             raise ValueError(
-                f"{ssh_file}: shape {ssh_da.shape[-2:]} doesn't match "
-                f"domain_cfg's T-grid {self._lat.shape}"
+                f"file(s) don't match any of ssh_var/u_var/v_var "
+                f"({self.ssh_var!r}/{self.u_var!r}/{self.v_var!r}): {sorted(unmatched)}"
+            )
+        return file_by_var
+
+    def __call__(self, files):
+        ''' read, unrotate, colocate, and mask -- returns [merged_dataset] '''
+        file_by_var = self._match_files(files)
+        has_u, has_v = self.u_var in file_by_var, self.v_var in file_by_var
+        if has_u != has_v:
+            raise ValueError(
+                f"{self.u_var}/{self.v_var} must both be given to rotate to true "
+                f"east/north -- got only {sorted(file_by_var)}"
             )
 
-        # mask land at U/V-points before colocation, so a land neighbor's non-NaN value can't
-        # get averaged into an adjacent ocean T-point
-        u_da = u_da.where(self._u_mask)
-        v_da = v_da.where(self._v_mask)
+        opened = {var: xr.open_dataset(path, chunks={}) for var, path in file_by_var.items()}
+        time_counters = [ds["time_counter"] for ds in opened.values()]
+        assert all(tc.equals(time_counters[0]) for tc in time_counters[1:]), \
+            f"time_counter mismatch across files: {files}"
 
-        u_t, v_t = _to_t_point(u_da, v_da)
-        u_east, v_north = unrotate_to_geographic(u_t, v_t, self._gcost, self._gsint)
+        data_vars = {}
+        for var, ds in opened.items():
+            da = ds[var].drop_vars(_SOURCE_COORDS_TO_DROP, errors="ignore")
+            if da.shape[-2:] != self._lat.shape:
+                raise ValueError(
+                    f"{file_by_var[var]}: shape {da.shape[-2:]} doesn't match "
+                    f"domain_cfg's T-grid {self._lat.shape}"
+                )
+            data_vars[var] = da
+
+        if has_u and has_v:
+            # mask land before colocating, so it can't leak into a coastal average
+            u_da = data_vars[self.u_var].where(self._u_mask)
+            v_da = data_vars[self.v_var].where(self._v_mask)
+            u_t, v_t = _to_t_point(u_da, v_da)
+            data_vars[self.u_var], data_vars[self.v_var] = unrotate_to_geographic(
+                u_t, v_t, self._gcost, self._gsint
+            )
 
         merged = xr.Dataset(
-            {self.ssh_var: ssh_da, self.u_var: u_east, self.v_var: v_north},
+            data_vars,
             coords={
                 "lat": (("y", "x"), self._lat),
                 "lon": (("y", "x"), self._lon),
