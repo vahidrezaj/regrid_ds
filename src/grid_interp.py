@@ -118,21 +118,24 @@ def create_local_metric_grid(
     return out
 
 
-def _create_masks(use_mask, sample_array, target_grid, thrd_ocean_fraction=0.5, source_mask=None):
+def _create_masks(use_mask, sample_array, target_grid, thrd_ocean_fraction=0.5,
+                  source_mask=None, extrap_method=None):
     '''
-    Create source and target mask, either derived from NaN values in `sample_array`
-    or, if `source_mask` is given, from that mask directly (used as-is, regardless of
-    whether `sample_array` itself contains NaN -- e.g. NEMO's `top_level`-derived
-    ocean mask is more reliable than `ssh`/`ubar`/`vbar`'s own NaN pattern, see
-    `nemo_reader.py`). If neither yields a mask, the function returns None.
+    Create source and target mask from `source_mask` if given, else from NaNs in
+    `sample_array`. Returns None, None if neither yields a mask.
+
+    NOTE: `source_mask` lets a caller pass a more reliable mask than data NaNs
+    give -- e.g. NEMO's `top_level`, see `nemo_reader.py`.
 
     Returns: source_mask, target_mask
     '''
     if not use_mask:
         return None, None
 
+    extrap = None
     if source_mask is not None:
         source_mask = source_mask.astype(float)
+        extrap = extrap_method
     elif sample_array.isnull().any():
         source_mask = (~sample_array.isnull()).astype(float)
     else:
@@ -150,7 +153,7 @@ def _create_masks(use_mask, sample_array, target_grid, thrd_ocean_fraction=0.5, 
         ds_source,
         ds_target,
         "bilinear",
-        unmapped_to_nan=True,
+        extrap_method=extrap,
     )
 
     target_ocean_fraction = regridder(source_mask)
@@ -200,9 +203,9 @@ class RegridPipeline:
     extrap_method : list or str or None
         Extrapolation method, one per variable if a list. `None` (the default)
         keeps land/edges as NaN; `nearest_s2d`/`inverse_dist` fill beyond the
-        source domain (e.g. for atmospheric data). Forced to `None` for any
-        region whose source mask is not `None` (masking and extrapolation are
-        mutually exclusive strategies for handling land/edges).
+        source domain (e.g. for atmospheric data). Forced to `None` when the
+        region's mask is NaN-derived, not for an explicit `source_mask` -- see
+        `_region_masks`.
     pair_vars_list : list of (str, str)
         (u, v) variable name pairs, already regridded, to rotate from true
         north/east into the target grid's local basis via `_rotate_vectors`.
@@ -214,11 +217,8 @@ class RegridPipeline:
 
     Per-call input
     --------------
-    Each `ds` in `ds_list` may optionally carry a `source_mask` variable; when
-    present, `_region_masks` uses it as the region's land/ocean mask as-is
-    instead of deriving one from NaNs in the first `variable_names` entry (see
-    `_create_masks`). Leave it out for sources where the data's own NaN pattern
-    already is the land/ocean mask.
+    Each `ds` in `ds_list` may optionally carry a `source_mask` variable, used
+    as the region's land/ocean mask as-is -- see `_region_masks`.
 
     Notes
     -----
@@ -248,7 +248,7 @@ class RegridPipeline:
             self.variable_names, interp_method, extrap_method
         )
 
-        # region_idx -> (source_mask, target_mask)
+        # region_idx -> (source_mask, target_mask, is_explicit)
         self._masks_cache = {}
         # (region_idx, group_idx) -> xe.Regridder, group_idx indexing self._var_groups
         self._regridder_cache = {}
@@ -291,15 +291,18 @@ class RegridPipeline:
 
     def _region_masks(self, ds, region_idx):
         '''
-        Return this region's (source_mask, target_mask) pair (see `_create_masks`),
-        building and caching it by `region_idx` the first time this region is
-        seen. Caching assumes each region's land/ocean mask is stable across
-        calls -- see class docstring.
+        Return this region's (source_mask, target_mask, is_explicit) triple (see
+        `_create_masks`), building and caching it by `region_idx` the first time
+        this region is seen. Caching assumes each region's land/ocean mask is
+        stable across calls -- see class docstring.
 
-        If `ds` carries a `source_mask` variable (added by `reader_fn` for
-        sources where the real land/ocean mask isn't reliably recoverable from
-        data NaNs alone, e.g. NEMO's `top_level`-derived mask), it's used as-is
-        instead of deriving one from NaNs -- see `_create_masks`.
+        If `ds` carries a `source_mask` variable, it's used as-is instead of
+        deriving one from NaNs -- see `_create_masks`.
+
+        NOTE: the cached triple's `is_explicit` flag records that. A NaN-derived
+        mask already treats every NaN as land, so extrapolating would contradict
+        it; an explicit mask (e.g. NEMO's domain_cfg one) doesn't, so data NaN
+        elsewhere can still mean extrapolatable gaps -- see `_regrid_region`.
         '''
         if region_idx not in self._masks_cache:
             sample_array = ds[self.variable_names[0]]
@@ -309,10 +312,17 @@ class RegridPipeline:
             source_mask = ds.get("source_mask")
             if source_mask is not None and "time" in source_mask.dims:
                 source_mask = source_mask.isel(time=0)
-            self._masks_cache[region_idx] = _create_masks(
-                self.use_mask, sample_array, self.target_grid, thrd_ocean_fraction=0.5,
-                source_mask=source_mask,
+            is_explicit = source_mask is not None
+            # extrap_method for whichever group covers variable_names[0]
+            extrap_method = next(
+                extrap for group_vars, _, extrap in self._var_groups
+                if self.variable_names[0] in group_vars
             )
+            src_mask, tgt_mask = _create_masks(
+                self.use_mask, sample_array, self.target_grid, thrd_ocean_fraction=0.5,
+                source_mask=source_mask, extrap_method=extrap_method,
+            )
+            self._masks_cache[region_idx] = (src_mask, tgt_mask, is_explicit)
         return self._masks_cache[region_idx]
 
     def _build_regridder(self, ds_source, interp_method, masks, extrap_method):
@@ -374,8 +384,8 @@ class RegridPipeline:
             cache_key = (region_idx, group_idx)
             regridder = self._regridder_cache.get(cache_key)
             if regridder is None:
-                # masking and extrapolation are mutually exclusive (see class docstring)
-                build_extrap = None if masks[0] is not None else extrap_method
+                # only suppress extrap for a NaN-derived mask -- see _region_masks
+                build_extrap = None if (masks[0] is not None and not masks[2]) else extrap_method
                 regridder = self._build_regridder(ds_source, interp_method, masks, build_extrap)
                 self._regridder_cache[cache_key] = regridder
 

@@ -293,6 +293,39 @@ def test_call_uses_embedded_source_mask_instead_of_data_nans():
     assert np.any(np.isclose(values[~np.isnan(values)], 10.0))
 
 
+def test_call_forces_extrap_none_for_nan_derived_mask_only():
+    ''' extrap_method must still be suppressed for a NaN-derived mask (masking
+    and extrapolation both claim the same NaN cells there), but honored when
+    the mask comes from an explicit `source_mask` instead -- see
+    RegridPipeline._regrid_region / _region_masks. '''
+    target_grid = _target_grid()
+    lats = np.arange(*SOURCE_LAT)
+    lons = np.arange(*SOURCE_LON)
+    lon2d, lat2d = np.meshgrid(lons, lats)
+    land = lat2d < LAT_0
+
+    nan_derived_pipeline = _build_pipeline(
+        ["sst"], extrap_method="nearest_s2d", target_grid=target_grid,
+    )
+    ds_nan = xr.Dataset(
+        {"sst": (("time", "j", "i"), np.where(land, np.nan, 10.0)[None, ...])},
+        coords={"time": [0], "lat": (("j", "i"), lat2d), "lon": (("j", "i"), lon2d)},
+    )
+    nan_derived_pipeline(ds_list=[ds_nan], time_mask=np.array([True]))
+    assert nan_derived_pipeline._regridder_cache[(0, 0)].extrap_method is None
+
+    explicit_pipeline = _build_pipeline(
+        ["sst"], extrap_method="nearest_s2d", target_grid=target_grid,
+    )
+    ds_explicit = xr.Dataset(
+        {"sst": (("time", "j", "i"), np.full((1,) + lat2d.shape, 10.0))},
+        coords={"time": [0], "lat": (("j", "i"), lat2d), "lon": (("j", "i"), lon2d)},
+    )
+    ds_explicit["source_mask"] = (("j", "i"), ~land)
+    explicit_pipeline(ds_list=[ds_explicit], time_mask=np.array([True]))
+    assert explicit_pipeline._regridder_cache[(0, 0)].extrap_method == "nearest_s2d"
+
+
 def test_call_mosaics_regions_by_priority():
     target_grid = _target_grid()
     pipeline = _build_pipeline(["sst"], target_grid=target_grid)
