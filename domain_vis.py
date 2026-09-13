@@ -2,26 +2,21 @@
 regrid one sample of whichever `dataset=` to visually confirm domain/regrdding
 '''
 
-import os
-from pathlib import Path
 import random
-from dotenv import load_dotenv
+from pathlib import Path
 
 import hydra
-from omegaconf import DictConfig, OmegaConf
-from hydra.utils import instantiate
-import numpy as np
 import matplotlib
+import numpy as np
+from hydra.utils import instantiate
+from omegaconf import DictConfig, OmegaConf
+
 matplotlib.use("Agg")  # no display
 # pylint: disable=wrong-import-position
-import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
+import matplotlib.pyplot as plt
 
 from grid_interp import RegridPipeline, create_local_metric_grid
-
-
-load_dotenv()
-base_path = Path(os.getenv("LOCAL_DIR"))
 
 # maps grid_interp's proj4 `proj_type` codes to the matching cartopy projection
 _PROJECTIONS = {
@@ -103,10 +98,14 @@ def _plot_variable(cfg, var, ds, ds_list, mask, target_grid, proj_type):
     ax_regrid.set_title(f"regridded  [{proj_type.upper()}]")
 
     # zoom out a bit so the regridded panel's own boundary box isn't sitting flush on the frame edge
-    pad = 0.03 * (target_grid["x"].max() - target_grid["x"].min())
+    corners = regrid_proj.transform_points(
+        ccrs.PlateCarree(), target_grid["lon_b"].ravel(), target_grid["lat_b"].ravel(),
+    )
+    x_corners, y_corners = corners[:, 0], corners[:, 1]
+    pad = 0.03 * (x_corners.max() - x_corners.min())
     ax_regrid.set_extent([
-        target_grid["x"].min() - pad, target_grid["x"].max() + pad,
-        target_grid["y"].min() - pad, target_grid["y"].max() + pad,
+        x_corners.min() - pad, x_corners.max() + pad,
+        y_corners.min() - pad, y_corners.max() + pad,
     ], crs=regrid_proj)
 
     # vmin/vmax are shared, so one colorbar (from the regridded mesh) covers both axes
@@ -122,10 +121,13 @@ def main(cfg: DictConfig):
     '''
     main
     '''
-    data_path = base_path / Path(cfg.dataset.folder)
+    data_path = Path(cfg.dataset.folder)
     file_ext = cfg.dataset.get("file_ext", ".nc")
-    prefixes = _to_plain(cfg.domain.file_prefix.get(cfg.dataset.name)) or [""]
-    files = [sorted(data_path.glob(pref + "*" + file_ext))[0] for pref in prefixes]
+    tokens = _to_plain(cfg.domain.file_match.get(cfg.dataset.name)) or [""]
+    files = [
+        min(data_path.glob(("*" + tok + "*" if tok else "*") + file_ext))
+        for tok in tokens
+    ]
 
     proj_type = "aeqd"
     target_grid = create_local_metric_grid(
@@ -134,6 +136,7 @@ def main(cfg: DictConfig):
         lat_0=cfg.domain.lat_0,
         lon_0=cfg.domain.lon_0,
         proj_type=proj_type,
+        alpha_deg=cfg.domain.get("alpha_deg", 0.0),
     )
 
     loader_fn = instantiate(cfg.dataset.reader_fn)

@@ -1,4 +1,5 @@
-'''Tests for RegridPipeline, _rotate_vectors, and RegridPipeline._build_var_groups'''
+'''Tests for RegridPipeline, _rotate_vectors, RegridPipeline._build_var_groups,
+and create_local_metric_grid's alpha_deg rotation'''
 
 import numpy as np
 import pytest
@@ -65,6 +66,79 @@ def _build_pipeline(
         extrap_method=extrap_method,
         pair_vars_list=pair_vars_list or [],
         use_mask=use_mask,
+    )
+
+
+# ---- create_local_metric_grid / alpha_deg ---------------------------------
+
+def test_alpha_deg_zero_matches_omitted_default():
+    with_zero = create_local_metric_grid(
+        domain_size_km=600, grid_size=7, lat_0=LAT_0, lon_0=LON_0, alpha_deg=0.0,
+    )
+    omitted = _target_grid()
+
+    assert np.array_equal(with_zero["lat"], omitted["lat"])
+    assert np.array_equal(with_zero["lon"], omitted["lon"])
+    assert np.allclose(with_zero["cos_g"].values, omitted["cos_g"].values)
+    assert np.allclose(with_zero["sin_g"].values, omitted["sin_g"].values)
+
+
+def test_alpha_deg_rotates_grid_coordinates_correctly():
+    ''' a rotated grid's nominal (x, y) point should land at the same lon/lat as
+    manually rotating the coordinates into the AEQD-native frame and calling the
+    existing (unrotated) transform directly -- an independent check of the
+    rotation direction/sign, not just a self-consistency check. '''
+    from pyproj import CRS, Transformer  # pylint: disable=import-outside-toplevel
+
+    alpha_deg = 37.0
+    alpha = np.deg2rad(alpha_deg)
+    domain_size_km, grid_size = 600, 7
+
+    grid = create_local_metric_grid(
+        domain_size_km=domain_size_km, grid_size=grid_size,
+        lat_0=LAT_0, lon_0=LON_0, alpha_deg=alpha_deg,
+    )
+
+    # a non-center, non-edge nominal grid point
+    iy, ix = 5, 2
+    x, y = grid["x"][ix], grid["y"][iy]
+
+    x_native = x * np.cos(alpha) + y * np.sin(alpha)
+    y_native = -x * np.sin(alpha) + y * np.cos(alpha)
+
+    proj_crs = CRS.from_proj4(f"+proj=aeqd +lat_0={LAT_0} +lon_0={LON_0} +datum=WGS84 +units=m")
+    inv = Transformer.from_crs(proj_crs, CRS.from_epsg(4326), always_xy=True)
+    lon_expected, lat_expected = inv.transform(x_native, y_native)
+
+    assert np.isclose(grid["lon"][iy, ix], lon_expected)
+    assert np.isclose(grid["lat"][iy, ix], lat_expected)
+
+
+def test_alpha_deg_is_carried_through_in_returned_grid():
+    ''' writers.py stashes this on `spatial_ref` as a discoverable (non-standard)
+    attr, so it must round-trip through the returned dict unchanged. '''
+    grid = create_local_metric_grid(
+        domain_size_km=600, grid_size=7, lat_0=LAT_0, lon_0=LON_0, alpha_deg=8.5,
+    )
+    assert grid["alpha_deg"] == 8.5
+    assert _target_grid()["alpha_deg"] == 0.0
+
+
+def test_alpha_deg_shifts_cos_sin_at_center_exactly():
+    ''' at the exact grid center, meridian convergence is 0, so cos_g/sin_g there
+    should equal cos(alpha)/sin(alpha) exactly -- a tight, unambiguous sign check. '''
+    alpha_deg = 15.0
+    grid_size = 7  # odd -> an exact center point exists
+    grid = create_local_metric_grid(
+        domain_size_km=600, grid_size=grid_size, lat_0=LAT_0, lon_0=LON_0, alpha_deg=alpha_deg,
+    )
+    center = grid_size // 2
+
+    assert np.isclose(
+        grid["cos_g"].values[center, center], np.cos(np.deg2rad(alpha_deg)), atol=1e-6,
+    )
+    assert np.isclose(
+        grid["sin_g"].values[center, center], np.sin(np.deg2rad(alpha_deg)), atol=1e-6,
     )
 
 
@@ -191,6 +265,65 @@ def test_call_caches_region_mask_and_applies_it_on_every_call():
         values = result["sst"].values
         assert np.any(np.isnan(values))  # masked-out "land" cells
         assert np.any(np.isclose(values[~np.isnan(values)], value))
+
+
+def test_call_uses_embedded_source_mask_instead_of_data_nans():
+    ''' a `source_mask` variable on `ds` (e.g. nemo_reader.py's domain_cfg-derived
+    ocean mask) must be used as-is, even when the data variable itself has no NaN
+    to derive a mask from -- and, since it carries no "time" dim, must survive
+    __call__'s per-timestep slicing untouched (see _select_time_and_depth). '''
+    target_grid = _target_grid()
+    pipeline = _build_pipeline(["sst"], target_grid=target_grid)
+
+    lats = np.arange(*SOURCE_LAT)
+    lons = np.arange(*SOURCE_LON)
+    lon2d, lat2d = np.meshgrid(lons, lats)
+    land = lat2d < LAT_0  # "land" per source_mask only -- sst itself has no NaN
+
+    ds = xr.Dataset(
+        {"sst": (("time", "j", "i"), np.full((1,) + lat2d.shape, 10.0))},
+        coords={"time": [0], "lat": (("j", "i"), lat2d), "lon": (("j", "i"), lon2d)},
+    )
+    ds["source_mask"] = (("j", "i"), ~land)  # True = ocean, no time dim
+
+    result = pipeline(ds_list=[ds], time_mask=np.array([True]))
+
+    values = result["sst"].values
+    assert np.any(np.isnan(values))  # masked out via source_mask despite sst having no NaN
+    assert np.any(np.isclose(values[~np.isnan(values)], 10.0))
+
+
+def test_call_forces_extrap_none_for_nan_derived_mask_only():
+    ''' extrap_method must still be suppressed for a NaN-derived mask (masking
+    and extrapolation both claim the same NaN cells there), but honored when
+    the mask comes from an explicit `source_mask` instead -- see
+    RegridPipeline._regrid_region / _region_masks. '''
+    target_grid = _target_grid()
+    lats = np.arange(*SOURCE_LAT)
+    lons = np.arange(*SOURCE_LON)
+    lon2d, lat2d = np.meshgrid(lons, lats)
+    land = lat2d < LAT_0
+
+    nan_derived_pipeline = _build_pipeline(
+        ["sst"], extrap_method="nearest_s2d", target_grid=target_grid,
+    )
+    ds_nan = xr.Dataset(
+        {"sst": (("time", "j", "i"), np.where(land, np.nan, 10.0)[None, ...])},
+        coords={"time": [0], "lat": (("j", "i"), lat2d), "lon": (("j", "i"), lon2d)},
+    )
+    nan_derived_pipeline(ds_list=[ds_nan], time_mask=np.array([True]))
+    assert nan_derived_pipeline._regridder_cache[(0, 0)].extrap_method is None
+
+    explicit_pipeline = _build_pipeline(
+        ["sst"], extrap_method="nearest_s2d", target_grid=target_grid,
+    )
+    ds_explicit = xr.Dataset(
+        {"sst": (("time", "j", "i"), np.full((1,) + lat2d.shape, 10.0))},
+        coords={"time": [0], "lat": (("j", "i"), lat2d), "lon": (("j", "i"), lon2d)},
+    )
+    ds_explicit["source_mask"] = (("j", "i"), ~land)
+    explicit_pipeline(ds_list=[ds_explicit], time_mask=np.array([True]))
+    assert explicit_pipeline._regridder_cache[(0, 0)].extrap_method == "nearest_s2d"
 
 
 def test_call_mosaics_regions_by_priority():

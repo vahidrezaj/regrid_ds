@@ -1,6 +1,6 @@
 name: hbm_forcing
 
-folder: winds_extract
+folder: "H:/dmi/winds_extract"
 variable_names: [var1, var11, var33, var34]
 
 # Optional new names/attrs: 
@@ -33,5 +33,5 @@ pair_vars_list:
   - [var33, var34]
 
 reader_fn:
-  _target_: io_functions.read_nc
+  _target_: readers.read_nc
   _partial_: true
