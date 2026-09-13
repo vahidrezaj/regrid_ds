@@ -4,7 +4,7 @@ Tools to take ocean and weather data (currents, winds, water temperature, bathym
 
 ![Baltic Sea HBM ocean temperature, regridded](figures/baltic_sea_hbm_ocean_temp.png)
 
-Right now it's built around one data source: the Danish Meteorological Institute's HBM model output for the Baltic Sea. The code is written so a new data source (say, a different ocean model) can be added later without rewriting the shared parts.
+Built around two data sources so far: the Danish Meteorological Institute's HBM model output for the Baltic Sea, and NEMO (Nordic Seas) ocean output + ERA5 atmospheric forcing. The shared regrid/write/validate machinery is dataset-agnostic -- adding a data source only means adding its own reader (a function like `readers.read_nc`, or a small module like `nemo_reader.py` when the source needs extra physics, e.g. unrotating a curvilinear grid's vectors) plus config.
 
 ## What it does, step by step
 
@@ -32,9 +32,9 @@ uv sync
 uv pip install -e ".[dev]"
 ```
 
-Copy `.env.example` to `.env` and fill in:
-- `LOCAL_DIR` — where the source data lives on disk
-- `FTP_HOST`, `FTP_USERNAME`, `FTP_PASS`, `REMOTE_DIR` — only needed if you're downloading source data yourself
+Each dataset config's `folder:` (and, for NEMO, `reader_fn.domain_cfg_path`) is a
+plain absolute path to that source's data on disk -- edit it directly to point at
+your own copy.
 
 ## Running it
 
@@ -45,6 +45,8 @@ python run.py                                        # defaults: hbm_ocean data,
 python run.py dataset=hbm_forcing domain=baltic_sea
 python run.py dataset=hbm_bathymetry mode=dry_run     # just print a summary, don't write anything
 python run.py dataset=hbm_forcing mode=check          # check an already-saved dataset is valid
+python run.py dataset=nemo_ocean domain=nordic_seas
+python run.py dataset=nemo_forcing domain=nordic_seas
 ```
 
 To generate a quick before/after plot for one dataset:
@@ -63,10 +65,11 @@ ruff check .
 ## Layout
 
 - `src/grid_interp.py` — builds the target grid and does the actual regridding + vector rotation. Not tied to HBM specifically.
-- `src/io_functions.py` — reading source files and writing the Zarr output store. Also not HBM-specific.
+- `src/readers.py` — reading source files (plain NetCDF, GeoTIFF). Dataset-agnostic.
+- `src/writers.py` — writing the Zarr output store / static `.npz` files. Also dataset-agnostic.
 - `src/validate.py` — read-only checks against a finished dataset.
-- `src/hbm_regridder.py` — glues the above together for the HBM data source (file queues, checkpointing, the main pipeline loop).
-- `src/lftp_downloader.py` — mirrors source data from DMI's FTP server.
+- `src/regridder.py` — dataset-agnostic file queues, checkpointing, and the main read -> regrid -> write pipeline loop. Source-specific reading (HBM, NEMO, ...) lives in `dataset.reader_fn`.
+- `src/nemo_reader.py` — NEMO curvilinear-grid reader: colocates `ssh`/`ubar`/`vbar` onto a common T-point grid and unrotates `ubar`/`vbar` from grid-relative to true east/north before regridding.
 - `configs/` — Hydra configs: `dataset/` (what to read) and `domain/` (where/when — grid, region, time range).
 - `run.py` — CLI entry point.
 - `domain_vis.py` — before/after visualization for one sample timestamp.

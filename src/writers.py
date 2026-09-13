@@ -1,147 +1,16 @@
 '''
-Input/Output functions for read and save data
+Dataset-agnostic output: `save_static_npz` for time-invariant sources (e.g. bathymetry),
+`ZarrDataWriter` for the time-series Zarr store.
 '''
 
 import os
 from pathlib import Path
 
+import dask.array as da
 import numpy as np
 import xarray as xr
-import dask.array as da
-import rioxarray
 import zarr
-from pyproj import CRS, Transformer
 from zarr.codecs import BloscCodec
-
-
-def _decode_nonstandard_time(ds, file):
-    '''
-    Some source files use `units: "day as %Y%m%d.%f"` instead (e.g. 20131001.25 ==
-    2013-10-01 06:00), which cause silent gap in downstream by skipping regridding 
-    and saving.
-    No-op when `time` already decoded to datetime64 (the common case).
-    '''
-    time = ds["time"]
-    if np.issubdtype(time.dtype, np.datetime64):
-        return ds
-
-    units = time.attrs.get("units", "")
-    if units != "day as %Y%m%d.%f":
-        raise ValueError(f"{file}: unrecognized/undecoded time units {units!r}")
-
-    raw = np.atleast_1d(time.values).astype(np.float64)
-    day_part = np.floor(raw + 1e-6).astype(np.int64)
-    seconds = np.round((raw - day_part) * 86400).astype(np.int64)
-    decoded = np.array([
-        np.datetime64(f"{d // 10000:04d}-{(d // 100) % 100:02d}-{d % 100:02d}")
-        + np.timedelta64(int(s), "s")
-        for d, s in zip(day_part, seconds)
-    ])
-    return ds.assign_coords(time=("time", decoded))
-
-
-def read_nc(files:list) -> list:
-    '''
-    Read nc files
-
-    Returns : list of loaded ds 
-    '''
-    # load ds
-    ds_list = []
-    for file in files:
-        ds = xr.open_dataset(file)
-        ds = _decode_nonstandard_time(ds, file)
-        ds_list.append(ds)
-
-    # check time files:
-    if len(ds_list) > 1:
-        assert all(ds.time.equals(ds_list[0].time) for ds in ds_list[1:]), \
-        f"Time vectors of the datasets are not identical. Files: {files}"
-
-    return ds_list
-
-
-
-def read_tif(
-        files: list, variable_names: list, crs=None, resolution_km: float | None = None,
-) -> list:
-    '''
-    Read single-band-per-variable GeoTIFF rasters (e.g. a static bathymetry grid).
-
-    Each file's band(s) become one data variable per entry in `variable_names`
-    (band i -> variable_names[i]). Coordinates are built as 2-D "lat"/"lon"
-    (dims "y", "x"), reprojected to EPSG:4326 from the raster's CRS -- matching
-    the curvilinear lat/lon-as-2-D-coords shape already used for NEMO ocean
-    sources, so downstream regridding needs no special-casing for tif sources.
-    Nodata pixels are read back as NaN.
-
-    crs : optional CRS (anything accepted by `pyproj.CRS.from_user_input`,
-        e.g. "EPSG:4326"), used only when the raster itself has no CRS
-        embedded.
-    resolution_km : optional target pixel size in km. When given, the raster is
-        block-averaged (before reprojecting) down to approximately this resolution.
-
-    Returns : list of loaded ds
-    '''
-    def coarsen_to_resolution(raster, crs):
-        ''' block-average `raster` (dims "y", "x") down to ~resolution_km per pixel, based
-        on its own native pixel size (converted from degrees to km at the raster's mean
-        latitude, if `crs` is geographic). Returns `raster` unchanged if it's already
-        coarser than that. '''
-        km_per_lat = 111.32
-        res_x, res_y = raster.rio.resolution()
-        if crs.is_geographic:
-            mean_lat = float(raster.y.values.mean())
-            km_per_deg_x = km_per_lat * np.cos(np.deg2rad(mean_lat))
-            native_km_x, native_km_y = abs(res_x) * km_per_deg_x, abs(res_y) * km_per_lat
-        else:
-            # pixel size is already in the CRS's linear unit (metres)
-            native_km_x, native_km_y = abs(res_x) / 1000, abs(res_y) / 1000
-
-        stride_x = max(1, round(resolution_km / native_km_x))
-        stride_y = max(1, round(resolution_km / native_km_y))
-        if stride_x == 1 and stride_y == 1:
-            return raster
-        return raster.coarsen(y=stride_y, x=stride_x, boundary="trim").mean()
-
-    ds_list = []
-    for file in files:
-        with rioxarray.open_rasterio(file, masked=True) as raster:
-            n_bands = raster.sizes["band"]
-            if n_bands != len(variable_names):
-                raise ValueError(
-                    f"{file}: raster has {n_bands} band(s), but {len(variable_names)} "
-                    f"variable_names were given: {variable_names}"
-                )
-
-            src_crs = raster.rio.crs or crs
-            if src_crs is None:
-                raise ValueError(
-                    f"{file}: raster has no embedded CRS and no `crs` override was given"
-                )
-            src_crs = CRS.from_user_input(src_crs)
-
-            if resolution_km:
-                raster = coarsen_to_resolution(raster, src_crs)
-
-            # native pixel-center coordinates -> 2-D lat/lon in EPSG:4326
-            x_mg, y_mg = np.meshgrid(raster.x.values, raster.y.values)
-            transformer = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
-            lon, lat = transformer.transform(x_mg, y_mg)
-
-            data = {var: raster.isel(band=i).values for i, var in enumerate(variable_names)}
-
-        ds = xr.Dataset(
-            {var: (("y", "x"), values) for var, values in data.items()},
-            coords={
-                "lat": (("y", "x"), lat),
-                "lon": (("y", "x"), lon),
-            },
-        )
-        ds_list.append(ds)
-
-    return ds_list
-
 
 
 def save_static_npz(path, arrays: dict, target_grid: dict):
@@ -152,7 +21,8 @@ def save_static_npz(path, arrays: dict, target_grid: dict):
     target_grid : as returned by `create_local_metric_grid`
 
     `crs` (a plain dict from `CRS.to_cf()`) is stashed as a 0-d object array;
-    read it back with `payload["crs"].item()`.
+    read it back with `payload["crs"].item()`. `alpha_ref` (grid rotation, degrees)
+    is only added when the grid is actually rotated -- see `ALPHA_REF_DESCRIPTION`.
     '''
     payload = {
         **arrays,
@@ -162,6 +32,9 @@ def save_static_npz(path, arrays: dict, target_grid: dict):
         "x": np.asarray(target_grid["x"]),
         "crs": np.array(target_grid["crs"], dtype=object),
     }
+    alpha_deg = target_grid.get("alpha_deg", 0.0)
+    if alpha_deg != 0.0:
+        payload["alpha_ref"] = np.asarray(alpha_deg)
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -190,11 +63,12 @@ class ZarrDataWriter:
         Variables expected in each `ds` passed to `write()`, keyed by their *source* name.
     target_grid : dict
         Target grid, as returned by `create_local_metric_grid`: 'lat', 'lon' (2-D, shape (y, x)),
-        'y', 'x' (1-D projected coords, metres), and 'crs' (CF grid-mapping attrs dict from
-        `CRS.to_cf()`).
+        'y', 'x' (1-D projected coords, metres), 'crs' (CF grid-mapping attrs dict from
+        `CRS.to_cf()`), and 'alpha_deg' (grid rotation -- saved as a separate 'alpha_ref'
+        variable, only when non-zero; see `ALPHA_REF_DESCRIPTION`).
     variable_attrs : dict, optional
-        `{source_name: {"name": store_name, "units": ..., ...}}`. When a source variable has an 
-        entry here, its data is stored under `store_name` instead of `source_name`, and these 
+        `{source_name: {"name": store_name, "units": ..., ...}}`. When a source variable has an
+        entry here, its data is stored under `store_name` instead of `source_name`, and these
         attrs are used verbatim instead of `ds[var].attrs`
     time_chunk : int, default 24
         Number of timesteps per Zarr chunk along the time axis.
@@ -286,6 +160,23 @@ class ZarrDataWriter:
                         f"CRS origin mismatch with existing store at {self.zarr_path}: "
                         f"{key}={new_crs.get(key)!r} vs stored {existing_crs.get(key)!r}"
                     )
+
+            new_alpha = self.grid.get('alpha_deg', 0.0)
+            existing_alpha = float(existing["alpha_ref"].values) if "alpha_ref" in existing else 0.0
+            if not np.isclose(existing_alpha, new_alpha):
+                raise ValueError(
+                    f"alpha_deg mismatch with existing store at {self.zarr_path}: "
+                    f"{new_alpha!r} vs stored {existing_alpha!r}"
+                )
+
+            # CRS origin/alpha_deg alone still doesn't capture domain_size/grid_size drift
+            # Compare the actual coordinate arrays too
+            if not (np.allclose(existing["lat"].values, self.grid["lat"], atol=1e-6)
+                    and np.allclose(existing["lon"].values, self.grid["lon"], atol=1e-6)):
+                raise ValueError(
+                    f"lat/lon grid mismatch with existing store at {self.zarr_path} "
+                    "(domain_size/grid_size may have changed)"
+                )
         finally:
             existing.close()
 
@@ -316,6 +207,22 @@ class ZarrDataWriter:
             # CF grid-mapping variable: dummy scalar value, real content is attrs
             "spatial_ref": ((), 0, self.grid['crs']),
         }
+
+        alpha_deg = self.grid.get('alpha_deg', 0.0)
+        if alpha_deg != 0.0:
+            alpha_ref_desc = (
+                "Clockwise rotation (in degrees) of the grid's local +y axis from true north "
+                "(see alpha_deg in grid_interp.py). Only present when the grid is rotated; its "
+                "absence means +y aligns with true north. Note: spatial_ref describes the "
+                "unrotated projection and does not account for this rotation. Always use the "
+                "explicit 2D lat/lon arrays for geolocation."
+            )
+            # only saved when the grid is actually rotated
+            coords["alpha_ref"] = ((), alpha_deg, {
+                "long_name": "grid rotation angle",
+                "units": "degrees",
+                "description": alpha_ref_desc,
+            })
 
         ds = xr.Dataset(coords=coords, attrs={"Conventions": "CF-1.8"})
 

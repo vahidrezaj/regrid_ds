@@ -4,14 +4,11 @@ run the dataset's preprocessing pipeline, log a dry-run summary, or check
 already-saved output on disk.
 '''
 
-import os
 import sys
-from pathlib import Path
-from dotenv import load_dotenv
 
 import hydra
-from omegaconf import DictConfig
 from hydra.utils import instantiate
+from omegaconf import DictConfig
 
 from validate import validate_output
 
@@ -28,18 +25,17 @@ def main(cfg: DictConfig):
         raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
 
     if mode == "check":
-        # read-only: doesn't need source data, so no LOCAL_DIR/base_path required
+        # read-only: doesn't need source data
         ok = validate_output(cfg)
         sys.exit(0 if ok else 1)
 
-    load_dotenv()
-    base_path = Path(os.getenv("LOCAL_DIR"))
     preproc_factory = instantiate(cfg.domain.preproc_cls)
-    preproc = preproc_factory(cfg, base_path)
+    preproc = preproc_factory(cfg)
 
     if mode == "dry_run":
         preproc.report()
     else:
+        preproc.report()
         preproc()
 
 

@@ -1,13 +1,11 @@
-'''Tests for ZarrDataWriter, read_tif, and save_static_pt'''
+'''Tests for ZarrDataWriter and save_static_npz'''
 
 import numpy as np
 import pytest
-import rasterio
 import xarray as xr
 from pyproj import CRS
-from rasterio.transform import from_origin
 
-from io_functions import ZarrDataWriter, read_tif, save_static_npz
+from writers import ALPHA_REF_DESCRIPTION, ZarrDataWriter, save_static_npz
 
 
 @pytest.fixture
@@ -88,6 +86,10 @@ def test_write_and_gaps(tmp_path, target_grid, time_vector):
     crs = CRS.from_cf(ds["spatial_ref"].attrs)
     assert crs.to_cf()["grid_mapping_name"] == "azimuthal_equidistant"
     assert ds["sst"].attrs["grid_mapping"] == "spatial_ref"
+
+    # alpha_ref (grid rotation) is only saved when the grid is actually rotated --
+    # target_grid here has no "alpha_deg" key (defaults to 0.0), so it must be absent
+    assert "alpha_ref" not in ds.coords
 
     ds.close()
 
@@ -213,6 +215,71 @@ def test_reopen_validates_configuration(tmp_path, target_grid, time_vector):
             time_chunk=4,
         )
 
+    # reopening with the same CRS origin but a different lat/lon grid (e.g. alpha_deg
+    # changed between runs, which CRS origin alone can't detect -- see grid_interp.py)
+    # should also raise
+    rotated_grid = dict(target_grid)
+    rotated_grid["lat"] = target_grid["lat"] + 5.0
+    with pytest.raises(ValueError):
+        ZarrDataWriter(
+            zarr_path=str(zarr_path),
+            time_vector=time_vector,
+            variable_names=variable_names,
+            target_grid=rotated_grid,
+            time_chunk=4,
+        )
+
+
+def test_alpha_ref_saved_only_when_rotated(tmp_path, target_grid, time_vector):
+    zarr_path = tmp_path / "test.zarr"
+    variable_names = ["sst"]
+
+    rotated_grid = dict(target_grid)
+    rotated_grid["alpha_deg"] = 12.5
+    writer = ZarrDataWriter(
+        zarr_path=str(zarr_path),
+        time_vector=time_vector,
+        variable_names=variable_names,
+        target_grid=rotated_grid,
+        time_chunk=4,
+    )
+    writer.close()
+
+    ds = xr.open_zarr(str(zarr_path), consolidated=True)
+    assert "alpha_ref" in ds.coords
+    assert float(ds["alpha_ref"].values) == 12.5
+    assert ds["alpha_ref"].attrs["description"] == ALPHA_REF_DESCRIPTION
+    ds.close()
+
+
+def test_reopen_detects_alpha_deg_mismatch(tmp_path, target_grid, time_vector):
+    ''' alpha_deg mismatch gets its own specific error message, distinct from the generic
+    lat/lon-mismatch fallback (both ultimately guard against the same kind of drift) '''
+    zarr_path = tmp_path / "test.zarr"
+    variable_names = ["sst"]
+
+    rotated_grid = dict(target_grid)
+    rotated_grid["alpha_deg"] = 12.5
+    writer = ZarrDataWriter(
+        zarr_path=str(zarr_path),
+        time_vector=time_vector,
+        variable_names=variable_names,
+        target_grid=rotated_grid,
+        time_chunk=4,
+    )
+    writer.close()
+
+    # target_grid itself has no "alpha_deg" key -> defaults to 0.0, which mismatches
+    # the 12.5 stored above
+    with pytest.raises(ValueError, match="alpha_deg"):
+        ZarrDataWriter(
+            zarr_path=str(zarr_path),
+            time_vector=time_vector,
+            variable_names=variable_names,
+            target_grid=target_grid,
+            time_chunk=4,
+        )
+
 
 def test_write_renames_and_overrides_attrs(tmp_path, target_grid, time_vector):
     zarr_path = tmp_path / "test.zarr"
@@ -267,77 +334,6 @@ def test_variable_attrs_rejects_duplicate_names(tmp_path, target_grid, time_vect
         )
 
 
-def _write_tif(path, data, crs, transform, nodata):
-    with rasterio.open(
-        path, "w",
-        driver="GTiff",
-        height=data.shape[0], width=data.shape[1],
-        count=1, dtype=str(data.dtype),
-        crs=crs, transform=transform,
-        nodata=nodata,
-    ) as dst:
-        dst.write(data, 1)
-
-
-def test_read_tif(tmp_path):
-    height, width = 4, 5
-    nodata = -9999.0
-    data = np.arange(width * height, dtype=np.float32).reshape(height, width)
-    data[0, 0] = nodata
-
-    # projected CRS (UTM zone 32N, covers Denmark/North Sea), 1 km pixels
-    crs = CRS.from_epsg(32632)
-    transform = from_origin(500000, 6100000, 1000, 1000)
-    tif_path = tmp_path / "bathy.tif"
-    _write_tif(tif_path, data, crs, transform, nodata)
-
-    ds_list = read_tif([tif_path], variable_names=["level"])
-
-    assert len(ds_list) == 1
-    ds = ds_list[0]
-    assert ds["level"].shape == (height, width)
-    assert ds["lat"].shape == (height, width)
-    assert ds["lon"].shape == (height, width)
-
-    # nodata pixel became NaN; a valid pixel keeps its value
-    assert np.isnan(ds["level"].values[0, 0])
-    assert ds["level"].values[1, 1] == data[1, 1]
-
-    # reprojected to EPSG:4326: UTM zone 32N sits roughly within [0, 15]E, [40, 70]N
-    assert np.all((ds["lon"].values > 0) & (ds["lon"].values < 15))
-    assert np.all((ds["lat"].values > 40) & (ds["lat"].values < 70))
-
-
-def test_read_tif_rejects_band_count_mismatch(tmp_path):
-    crs = CRS.from_epsg(32632)
-    transform = from_origin(500000, 6100000, 1000, 1000)
-    tif_path = tmp_path / "bathy.tif"
-    _write_tif(tif_path, np.zeros((3, 3), dtype=np.float32), crs, transform, -9999.0)
-
-    with pytest.raises(ValueError):
-        read_tif([tif_path], variable_names=["level", "extra"])
-
-
-def test_read_tif_missing_crs_uses_override(tmp_path):
-    # some raw exports (e.g. the real DMI bathymetry source) drop the embedded
-    # CRS even though pixel coordinates are already plain WGS84 lon/lat
-    data = np.arange(12, dtype=np.float32).reshape(3, 4)
-    transform = from_origin(-5.0, 66.0, 0.5, 0.5)
-    tif_path = tmp_path / "bathy_no_crs.tif"
-    _write_tif(tif_path, data, None, transform, None)
-
-    with pytest.raises(ValueError):
-        read_tif([tif_path], variable_names=["level"])
-
-    ds_list = read_tif([tif_path], variable_names=["level"], crs="EPSG:4326")
-    ds = ds_list[0]
-    # EPSG:4326 -> EPSG:4326 reprojection is the identity transform: pixel-center
-    # coordinates pass through unchanged (origin -5.0/66.0, 0.5-degree pixels)
-    assert np.allclose(ds["lon"].values[0, :], [-4.75, -4.25, -3.75, -3.25])
-    assert np.allclose(ds["lat"].values[:, 0], [65.75, 65.25, 64.75])
-    assert np.array_equal(ds["level"].values, data)
-
-
 def test_save_static_npz(tmp_path, target_grid):
     npz_path = tmp_path / "hbm_bathymetry.npz"
     level = np.arange(target_grid["lat"].size, dtype=np.float32).reshape(target_grid["lat"].shape)
@@ -350,3 +346,17 @@ def test_save_static_npz(tmp_path, target_grid):
     assert np.allclose(payload["lat"], target_grid["lat"])
     assert np.allclose(payload["lon"], target_grid["lon"])
     assert payload["crs"].item() == target_grid["crs"]
+    # target_grid fixture has no "alpha_deg" key -> alpha_ref must be absent, not 0.0
+    assert "alpha_ref" not in payload.files
+
+
+def test_save_static_npz_includes_alpha_ref_when_rotated(tmp_path, target_grid):
+    npz_path = tmp_path / "nemo.npz"
+    level = np.arange(target_grid["lat"].size, dtype=np.float32).reshape(target_grid["lat"].shape)
+    rotated_grid = dict(target_grid)
+    rotated_grid["alpha_deg"] = 12.5
+
+    save_static_npz(npz_path, {"level": level}, rotated_grid)
+
+    payload = np.load(npz_path, allow_pickle=True)
+    assert payload["alpha_ref"] == 12.5
