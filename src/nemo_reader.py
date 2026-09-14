@@ -16,6 +16,8 @@ import xarray as xr
 
 # leftover source-file coords that don't apply to the merged output
 _SOURCE_COORDS_TO_DROP = ["nav_lat", "nav_lon", "time_centered"]
+# NEMO timestamps hourly means at bin center (e.g. 00:30); shift to bin start to align with ERA5.
+_TIME_LABEL_SHIFT = np.timedelta64(30, "m")
 
 
 def _bearing(lon1, lat1, lon2, lat2):
@@ -200,6 +202,7 @@ class NemoOceanReader:
             },
         )
         merged = merged.rename({"time_counter": "time"})
+        merged["time"] = merged["time"] - _TIME_LABEL_SHIFT
 
         # NaN land T-point
         merged = merged.where(self._ocean_mask)

@@ -12,7 +12,7 @@ lat_0: 70.5
 lon_0: -2
 
 from_to:  # // [start included, end excluded) -- 1993 is missing from the source entirely
-  - 1994-01-01T00:30
+  - 1994-01-01T00:00
   - 2025-01-01T00:00
 ts: 1 # // time-step in `hour`
 
