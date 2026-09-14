@@ -12,6 +12,9 @@ extrap_method: nearest_s2d
 
 use_mask: false  # ERA5 is a complete global field; NaN (if any) is coverage, not land
 
+# Optional: ERA5 is 3-hourly; interpolate onto domain.ts's hourly grid.
+time_interp_method: [linear, 3]  # // # [method, max_gap (hours)]
+
 # paired vector variables for rotation-aware regridding (from true north/east into the target grid's local basis):
 pair_vars_list:
   - [u10, v10]

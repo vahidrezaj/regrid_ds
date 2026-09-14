@@ -13,6 +13,7 @@ import os
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 import numpy as np
+import xarray as xr
 
 from grid_interp import RegridPipeline, create_local_metric_grid
 from writers import ZarrDataWriter, save_static_npz
@@ -198,6 +199,13 @@ class PreProcessing:
             np.timedelta64(cfg.domain.ts, "h"),
         )
 
+        # optional time-axis interpolation (e.g. 3-hourly ERA5 onto an hourly grid):
+        # [method, max_gap (hours)], or null/absent to disable
+        time_interp = _to_plain(cfg.dataset.get("time_interp_method", None))
+        self.time_interp_method, self.time_interp_max_gap = (
+            time_interp if time_interp is not None else (None, None)
+        )
+
         # dataset writer:
         self.zarr_path = self.out_path / f"{self.dataset_name}.zarr"
         self.time_chunk = cfg.domain.time_chunk
@@ -301,6 +309,8 @@ class PreProcessing:
 
             # regridding into the target grid:
             ds = self.regrid_pipeline(ds_list, time_mask)
+            # fill gaps left by a source coarser than domain.ts (e.g. 3-hourly on an hourly grid):
+            ds = self._fill_time_gaps(ds)
             regrid_time = monotonic()
 
             # write Zarr dataset:
@@ -335,6 +345,47 @@ class PreProcessing:
             "[%s] completed: %d files processed in %s",
             self.dataset_name, processed, _fmt_duration(monotonic() - start_time),
         )
+
+    def _fill_time_gaps(self, ds):
+        '''
+        Linearly interpolate ds (already on the target grid) to every time_vector step within
+        its time span. Fills gaps when the source is coarser than domain.ts (e.g. 3-hourly
+        ERA5 on an hourly grid). Does nothing if dataset.time_interp_method is not set.
+
+        Also inserts in the last written value from the store to bridge gaps across file
+        boundaries, but only when that value is within time_interp_max_gap hours. So a
+        missing file is never silently filled with a straight line. The same time_interp_max_gap
+        limit is also enforced *inside* ds's own native time axis
+        '''
+        if self.time_interp_method is None:
+            return ds
+
+        last = self.writer.last_written
+        if last is not None:
+            last_time, last_vals = last
+            gap_h = (ds["time"].values.min() - last_time) / np.timedelta64(1, "h")
+            if 0 < gap_h <= self.time_interp_max_gap:
+                boundary = xr.Dataset(
+                    {var: (("time", "y", "x"), vals[None]) for var, vals in last_vals.items()},
+                    coords={"time": [last_time]},
+                )
+                ds = xr.concat([boundary, ds], dim="time")
+
+        if ds.sizes["time"] < 2:
+            # a single point has no slope to interpolate along
+            return ds
+
+        real_times = ds["time"].values
+        target_times = self.time_vector[
+            (self.time_vector >= real_times.min()) & (self.time_vector <= real_times.max())
+        ]
+        interpolated = ds.interp(time=target_times, method=self.time_interp_method)
+
+        idx = np.searchsorted(real_times, target_times).clip(1, len(real_times) - 1)
+        gap_h = (real_times[idx] - real_times[idx - 1]) / np.timedelta64(1, "h")
+        too_big = (gap_h > self.time_interp_max_gap) & ~np.isin(target_times, real_times)
+        interpolated = interpolated.where(~xr.DataArray(too_big, dims="time"))
+        return interpolated
 
     def _apply_file_range(self, fresh_files, file_range):
         ''' slice every region's file queue to the [start, end] window found by name in the first 

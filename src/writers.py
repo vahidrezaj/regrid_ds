@@ -19,10 +19,6 @@ def save_static_npz(path, arrays: dict, target_grid: dict):
 
     arrays : dict of {store_name: np.ndarray}
     target_grid : as returned by `create_local_metric_grid`
-
-    `crs` (a plain dict from `CRS.to_cf()`) is stashed as a 0-d object array;
-    read it back with `payload["crs"].item()`. `alpha_ref` (grid rotation, degrees)
-    is only added when the grid is actually rotated -- see `ALPHA_REF_DESCRIPTION`.
     '''
     payload = {
         **arrays,
@@ -65,7 +61,7 @@ class ZarrDataWriter:
         Target grid, as returned by `create_local_metric_grid`: 'lat', 'lon' (2-D, shape (y, x)),
         'y', 'x' (1-D projected coords, metres), 'crs' (CF grid-mapping attrs dict from
         `CRS.to_cf()`), and 'alpha_deg' (grid rotation -- saved as a separate 'alpha_ref'
-        variable, only when non-zero; see `ALPHA_REF_DESCRIPTION`).
+        variable, only when non-zero).
     variable_attrs : dict, optional
         `{source_name: {"name": store_name, "units": ..., ...}}`. When a source variable has an
         entry here, its data is stored under `store_name` instead of `source_name`, and these
@@ -130,6 +126,19 @@ class ZarrDataWriter:
             self._initialize()
 
         self.store = zarr.open_group(self.zarr_path, mode="a")
+
+        # most recently written (time, {var: values}), or None if nothing has been written yet
+        # used for time interpolation when enabled in config
+        written = ~np.asarray(self.store["nan_mask"][:], dtype=bool)
+        idx = np.flatnonzero(written)
+        if idx.size:
+            i = int(idx[-1])
+            self.last_written = (
+                self.time_vector[i],
+                {var: self.store[self._store_name[var]][i] for var in self.variable_names},
+            )
+        else:
+            self.last_written = None
 
     def _validate_existing(self):
         ''' check an existing store matches this writer's configuration '''
@@ -294,11 +303,15 @@ class ZarrDataWriter:
         if not np.all(matched):
             raise ValueError(f"time values not found in time_vector: {time[~matched]}")
 
+        last_i = int(np.argmax(time))
+        last_values = {}
         attrs_changed = False
         for var in self.variable_names:
             store_name = self._store_name[var]
 
-            self.store[store_name][positions, :, :] = ds[var].transpose("time", "y", "x").values
+            values_arr = ds[var].transpose("time", "y", "x").values
+            self.store[store_name][positions, :, :] = values_arr
+            last_values[var] = values_arr[last_i]
 
             # keep attrs (units, long_name, ...)
             if var not in self._attrs_written:
@@ -313,6 +326,8 @@ class ZarrDataWriter:
                     self.store[store_name].attrs.update(var_attrs)
                     attrs_changed = True
                 self._attrs_written.add(var)
+
+        self.last_written = (self.time_vector[int(positions[last_i])], last_values)
 
         # False = data exists
         self.store["nan_mask"][positions] = False
