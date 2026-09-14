@@ -5,7 +5,16 @@ import pytest
 import xarray as xr
 from pyproj import CRS
 
-from writers import ALPHA_REF_DESCRIPTION, ZarrDataWriter, save_static_npz
+from writers import ZarrDataWriter, save_static_npz
+
+# mirrors the literal description writers.py::_initialize attaches to alpha_ref
+ALPHA_REF_DESCRIPTION = (
+    "Clockwise rotation (in degrees) of the grid's local +y axis from true north "
+    "(see alpha_deg in grid_interp.py). Only present when the grid is rotated; its "
+    "absence means +y aligns with true north. Note: spatial_ref describes the "
+    "unrotated projection and does not account for this rotation. Always use the "
+    "explicit 2D lat/lon arrays for geolocation."
+)
 
 
 @pytest.fixture

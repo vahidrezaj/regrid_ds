@@ -323,10 +323,13 @@ def test_read_nemo_bathymetry_masks_land_and_uses_t_point_coords(tmp_path):
 
     ds = read_nemo_bathymetry([domain_cfg_path])[0]
 
-    assert set(ds.data_vars) == {"bathy_metry"}
+    assert set(ds.data_vars) == {"bathy_metry", "source_mask"}
     assert ds["bathy_metry"].dims == ("y", "x")
     assert np.array_equal(ds["lat"].values, lat)
     assert np.array_equal(ds["lon"].values, lon)
 
     assert np.isnan(ds["bathy_metry"].values[:, 0]).all()  # land column stays NaN
     assert np.allclose(ds["bathy_metry"].values[:, 1:], bathy[:, 1:])  # ocean unaffected
+
+    # embedded source_mask is domain_cfg's top_level directly, same as NemoOceanReader
+    assert np.array_equal(ds["source_mask"].values, top_level.astype(bool))
