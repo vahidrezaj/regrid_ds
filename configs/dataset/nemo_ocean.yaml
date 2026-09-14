@@ -18,7 +18,7 @@ use_mask: true  # NaN in ssh/ubar/vbar is a real land mask
 
 reader_fn:
   _target_: nemo_reader.NemoOceanReader
-  domain_cfg_path: "H:/NordicSeas/ocean/nordic_seas_domain_cfg.nc"
+  domain_cfg_path: "${..folder}/nordic_seas_domain_cfg.nc"
   ssh_var: ssh
   u_var: ubar
   v_var: vbar
