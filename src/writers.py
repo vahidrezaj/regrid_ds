@@ -45,7 +45,7 @@ def save_static_npz(path, arrays: dict, target_grid: dict):
 class ZarrDataWriter:
     '''
     Pre-allocate a Zarr store sized for the full run and fill it in incrementally,
-    one array per variable plus a `nan_mask` marking which timestamps have been written.
+    one array per variable plus a `missing_mask` marking which timestamps have been written.
 
     Parameters
     ----------
@@ -76,7 +76,7 @@ class ZarrDataWriter:
     Notes
     -----
     Gaps in the source data (timestamps never passed to `write()`) are
-    left as NaN with `nan_mask=True`, rather than written explicitly.
+    left as NaN with `missing_mask=True`, rather than written explicitly.
     '''
 
     # attrs we manage ourselves; never overwritten by source variable attrs
@@ -129,7 +129,7 @@ class ZarrDataWriter:
 
         # most recently written (time, {var: values}), or None if nothing has been written yet
         # used for time interpolation when enabled in config
-        written = ~np.asarray(self.store["nan_mask"][:], dtype=bool)
+        written = ~np.asarray(self.store["missing_mask"][:], dtype=bool)
         idx = np.flatnonzero(written)
         if idx.size:
             i = int(idx[-1])
@@ -258,11 +258,11 @@ class ZarrDataWriter:
 
         # True  = timestamp has not been written
         # False = timestamp has been written
-        ds["nan_mask"] = (
+        ds["missing_mask"] = (
             "time",
             da.empty(nt, chunks=(self.time_chunk,), dtype=bool),
         )
-        encoding["nan_mask"] = {
+        encoding["missing_mask"] = {
             "chunks": (self.time_chunk,),
             "fill_value": True,
         }
@@ -283,7 +283,7 @@ class ZarrDataWriter:
         `ds` must have a `time` coordinate and a data variable for each of
         `self.variable_names`. Timestamps not present in `ds` are simply
         left untouched. gaps in the source data are represented by
-        omission (they stay at fill_value=NaN / nan_mask=True), not by
+        omission (they stay at fill_value=NaN / missing_mask=True), not by
         writing NaN explicitly.
         """
 
@@ -330,7 +330,7 @@ class ZarrDataWriter:
         self.last_written = (self.time_vector[int(positions[last_i])], last_values)
 
         # False = data exists
-        self.store["nan_mask"][positions] = False
+        self.store["missing_mask"][positions] = False
 
         if attrs_changed:
             # consolidated metadata to update attrs from its original file

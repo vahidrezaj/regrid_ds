@@ -71,11 +71,14 @@ class PreProcessing:
           is entirely up to the reader: geographic regions to mosaic (HBM, token is a filename
           prefix), or per-variable files to merge into one dataset (NEMO, token is a filename
           suffix before the extension).
-        - `domain.file_range` : optional `[start, end]` filenames (inclusive) to slice
-          each region's queue to before processing, saving reads on files outside the
-          range of interest. Matched by name against the first region only, same slice
-          applied to every region. Either bound may be `null` to leave that end open;
-          a missing/typo'd bound behaves the same way -- see `_apply_file_range`.
+        - `domain.file_range` : dict of `{dataset_name: [start, end] or null}`, same
+          per-dataset shape as `file_match` (and, like it, never applies to a static
+          dataset). When present and non-null for `dataset.name`, slices that dataset's
+          queue to the `[start, end]` filenames (inclusive) before processing, saving
+          reads on files outside the range of interest. Matched by name against the
+          first region only, same slice applied to every region. Either bound may be
+          `null` to leave that end open; a missing/typo'd bound behaves the same way --
+          see `_apply_file_range`.
         - `domain.domain_size` / `grid_size` / `lat_0` / `lon_0` : passed to
           `create_local_metric_grid` to build the target grid.
         - `domain.from_to` / `ts` : start/end timestamps and step (hours) defining
@@ -142,7 +145,7 @@ class PreProcessing:
             for tok in tokens
         ]
 
-        file_range = _to_plain(cfg.domain.get("file_range", None))
+        file_range = _to_plain(cfg.domain.get("file_range", {}) or {}).get(self.dataset_name)
         if not self.static and file_range and fresh_files and fresh_files[0]:
             fresh_files = self._apply_file_range(fresh_files, file_range)
 
