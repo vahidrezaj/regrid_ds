@@ -87,8 +87,8 @@ def test_write_and_gaps(tmp_path, target_grid, time_vector):
         assert np.all(values[6:9] == 2.0)
         assert np.all(np.isnan(values[~written_mask]))
 
-    nan_mask = ds["nan_mask"].values
-    assert np.array_equal(nan_mask, ~written_mask)
+    missing_mask = ds["missing_mask"].values
+    assert np.array_equal(missing_mask, ~written_mask)
 
     # CF grid-mapping metadata present and parseable
     assert "spatial_ref" in ds.coords

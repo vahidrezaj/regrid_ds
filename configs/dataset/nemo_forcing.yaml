@@ -4,7 +4,16 @@ folder: "H:/NordicSeas/ECMWF"
 variable_names: [msl, u10, v10]
 
 # Optional new names/attrs:
-variable_attrs: null
+variable_attrs: 
+  msl:
+    units: Pa
+    long_name: "mean sea level pressure"
+  u10:
+    units: "m s**-1"
+    long_name: "10 metre U wind component"
+  v10:
+    units: "m s**-1"
+    long_name: "10 metre V wind component"
 
 # interpolation/extrapolation method(s): a single string or a list of strings with one entry per variable
 interp_method: bilinear

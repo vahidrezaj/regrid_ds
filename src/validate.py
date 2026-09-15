@@ -93,14 +93,14 @@ def validate_zarr(cfg, out_path: Path) -> bool:
         )
 
         missing = set(expected_vars) - set(ds.data_vars)
-        extra = set(ds.data_vars) - set(expected_vars) - {"nan_mask"}
+        extra = set(ds.data_vars) - set(expected_vars) - {"missing_mask"}
         ok &= _ok(not missing, "no missing variables (expected %s)", expected_vars)
         if extra:
             _warn("unexpected extra variable(s) in store: %s", sorted(extra))
 
-        ok &= _ok("nan_mask" in ds.data_vars, "nan_mask present")
-        if "nan_mask" in ds.data_vars:
-            unwritten = np.where(ds["nan_mask"].values)[0]
+        ok &= _ok("missing_mask" in ds.data_vars, "missing_mask present")
+        if "missing_mask" in ds.data_vars:
+            unwritten = np.where(ds["missing_mask"].values)[0]
             ok &= _ok(
                 len(unwritten) == 0,
                 "all %d timestamps written (0 unwritten)", len(expected_time),
