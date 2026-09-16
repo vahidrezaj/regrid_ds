@@ -4,7 +4,8 @@ defaults:
   - _self_
 
 save_to: data
-output_path: ${save_to}/${domain.name}
+output_suffix: ""  # // e.g. "_test2" via CLI override
+output_path: ${save_to}/${dataset.source}_${domain.name}${output_suffix}
 verbose: false
 mode: run  # // one of: run, dry_run, check
 

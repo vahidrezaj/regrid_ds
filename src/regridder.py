@@ -55,8 +55,12 @@ class PreProcessing:
         - `dataset.reader_fn` : a `_partial_: true` target instantiated into `loader_fn`,
           called with a list of file paths (one per region) and returning a matching
           list of opened datasets.
-        - `dataset.name` : used to namespace the checkpoint/output file, and to look up
-          this dataset's entry in `domain.file_match`.
+        - `dataset.name` : used to look up this dataset's entry in `domain.file_match`/
+          `file_range`.
+        - `dataset.source` : e.g. `"hbm"`, `"nemo"`. Stripped as a `f"{source}_"` prefix
+          from `dataset.name` to get `self.dataset_name`, used for the checkpoint/output
+          filename (`ocean.zarr` rather than `hbm_ocean.zarr`) -- source disambiguation
+          lives in `output_path` instead (`${dataset.source}_${domain.name}`).
         - `dataset.file_ext` : source file extension to glob for, default `".nc"`.
         - `dataset.static` : bool, default `False`. `True` marks a time-invariant
           source (e.g. a bathymetry raster): no `time_vector`/`ZarrDataWriter`/
@@ -113,7 +117,7 @@ class PreProcessing:
     result to a `.npz` file, skipping entirely if that file already exists.
     '''
     def __init__(self, cfg, base_path=""):
-        self.dataset_name = cfg.dataset.name
+        self.dataset_name = cfg.dataset.name.removeprefix(f"{cfg.dataset.source}_")
         self.verbose = bool(cfg.get("verbose", False))
         dry_run = cfg.get("mode", "run") == "dry_run"
         logger.setLevel(logging.DEBUG if self.verbose else logging.INFO)
@@ -139,13 +143,13 @@ class PreProcessing:
                 self.dataset_name, len(self.avail_files[0]) if self.avail_files[0] else 0,
             )
 
-        tokens = _to_plain(cfg.domain.file_match.get(self.dataset_name)) or [""]
+        tokens = _to_plain(cfg.domain.file_match.get(cfg.dataset.name)) or [""]
         fresh_files = [
             sorted(self.data_path.glob(("*" + tok + "*" if tok else "*") + file_ext))
             for tok in tokens
         ]
 
-        file_range = _to_plain(cfg.domain.get("file_range", {}) or {}).get(self.dataset_name)
+        file_range = _to_plain(cfg.domain.get("file_range", {}) or {}).get(cfg.dataset.name)
         if not self.static and file_range and fresh_files and fresh_files[0]:
             fresh_files = self._apply_file_range(fresh_files, file_range)
 

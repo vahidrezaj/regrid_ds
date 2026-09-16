@@ -1,4 +1,5 @@
 name: hbm_ocean
+source: hbm
 
 folder: "H:/dmi/extract_2013-2025_currents"
 variable_names: [elev, uvel, vvel, salt, temp]

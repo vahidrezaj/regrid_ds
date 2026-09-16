@@ -1,4 +1,5 @@
 name: hbm_forcing
+source: hbm
 
 folder: "H:/dmi/winds_extract"
 variable_names: [var1, var11, var33, var34]

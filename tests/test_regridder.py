@@ -9,6 +9,7 @@ def _make_cfg(folder, tokens, out_path):
     return OmegaConf.create({
         "dataset": {
             "name": "test_ds",
+            "source": "test",
             "folder": str(folder),
             "variable_names": ["sst"],
             "variable_attrs": None,

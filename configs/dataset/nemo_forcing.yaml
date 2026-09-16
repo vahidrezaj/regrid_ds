@@ -1,4 +1,5 @@
 name: nemo_forcing
+source: nemo
 
 folder: "H:/NordicSeas/ECMWF"
 variable_names: [msl, u10, v10]

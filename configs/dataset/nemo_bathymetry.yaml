@@ -1,4 +1,5 @@
 name: nemo_bathymetry
+source: nemo
 
 folder: "H:/NordicSeas/ocean"
 variable_names: [bathy_metry]

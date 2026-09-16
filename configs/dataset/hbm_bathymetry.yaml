@@ -1,4 +1,5 @@
 name: hbm_bathymetry
+source: hbm
 
 folder: "H:/dmi/bathymetry"
 variable_names: [level]

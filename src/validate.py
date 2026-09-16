@@ -54,7 +54,7 @@ def _sample_time_indices(n_time, n_samples=5):
 
 def validate_zarr(cfg, out_path: Path) -> bool:
     ''' validate a time-series dataset's Zarr store against `cfg` '''
-    name = cfg.dataset.name
+    name = cfg.dataset.name.removeprefix(f"{cfg.dataset.source}_")
     zarr_path = out_path / f"{name}.zarr"
     cp_path = out_path / f"checkpoint_{name}.tmp"
     variable_names = list(cfg.dataset.variable_names)
@@ -176,7 +176,7 @@ def validate_zarr(cfg, out_path: Path) -> bool:
 
 def validate_npz(cfg, out_path: Path) -> bool:
     ''' validate a static dataset's `.npz` output against `cfg` '''
-    name = cfg.dataset.name
+    name = cfg.dataset.name.removeprefix(f"{cfg.dataset.source}_")
     npz_path = out_path / f"{name}.npz"
     variable_names = list(cfg.dataset.variable_names)
     variable_attrs = _to_plain(cfg.dataset.get("variable_attrs", None))

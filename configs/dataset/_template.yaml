@@ -1,0 +1,59 @@
+# Template dataset config -- copy to configs/dataset/<source>_<kind>.yaml and fill in.
+# One shape covers all three kinds (ocean/forcing: time-series, bathymetry: static).
+
+# Dataset id -- must have a matching entry in the domain's file_match (and, optionally, file_range).
+name: hbm_ocean
+
+# Prefix of `name`, stripped off for output filenames (the output folder still gets it).
+source: hbm
+
+# Where the source files live.
+folder: "/path/to/source/data"
+
+# Source variable names to read and regrid.
+variable_names: [var1, var2]
+
+# Rename/units/long_name overrides for the output.
+variable_attrs: null
+# variable_attrs:
+#   var1:
+#     name: renamed_var1
+#     units: "..."
+#     long_name: "..."
+
+# How to interpolate onto the target grid.
+interp_method: bilinear
+# interp_method: [bilinear, nearest_s2d]   # one entry per variable
+
+# How to fill gaps outside the source's own coverage.
+extrap_method: nearest_s2d
+# extrap_method: null   # no extrapolation
+
+# Is NaN in the source a real land mask, or just a coverage gap?
+# true = land, leave masked (default); false = gap, let extrap_method fill it in. 
+use_mask: true
+
+# Vector variable pairs to rotate from true north/east into the target grid's own axes.
+pair_vars_list: []
+# pair_vars_list:
+#   - [u_var, v_var]
+
+# Source file extension to glob for.
+file_ext: .nc
+# file_ext: .tif
+
+# Time-invariant dataset (e.g. bathymetry)? Skips the time axis/checkpoint/Zarr writer
+# one read+regrid, saved straight to a .npz file.
+static: false
+
+# Interpolate onto domain.ts's time grid when the source is coarser than it.
+time_interp_method: null
+# time_interp_method: [linear, 3]   # [method, max_gap (hours)]
+
+# Reads a list of file paths (one per domain.file_match region/token) and returns a matching list of opened xr.Dataset.
+reader_fn:
+  _target_: readers.read_nc
+  _partial_: true
+# reader_fn:
+#   _target_: nemo_reader.NemoOceanReader   # stateful class, instantiated once per run
+#   domain_cfg_path: "${..folder}/domain_cfg.nc"

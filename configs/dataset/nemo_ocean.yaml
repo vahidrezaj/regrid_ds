@@ -1,4 +1,5 @@
 name: nemo_ocean
+source: nemo
 
 folder: "H:/NordicSeas/ocean"
 variable_names: [ssh] # [ssh, ubar, vbar]
