@@ -87,7 +87,8 @@ class PreProcessing:
           `create_local_metric_grid` to build the target grid.
         - `domain.from_to` / `ts` : start/end timestamps and step (hours) defining
           `time_vector`, the full output time axis. Unused when `dataset.static` is `True`.
-        - `domain.time_chunk` / `clevel` : forwarded to `ZarrDataWriter`.
+        - `domain.time_chunk` / `time_shard` / `clevel` : forwarded to `ZarrDataWriter`
+          (`time_shard` optional, null/absent = no sharding).
           Unused when `dataset.static` is `True`.
         - `output_path` : base directory for the checkpoint file and Zarr store /
           `.npz` file.
@@ -216,6 +217,7 @@ class PreProcessing:
         # dataset writer:
         self.zarr_path = self.out_path / f"{self.dataset_name}.zarr"
         self.time_chunk = cfg.domain.time_chunk
+        self.time_shard = cfg.domain.get("time_shard", None)
         if dry_run:
             # no need to initialize ZarrDataWriter. skip creating/opening Zarr fole on disk
             return
@@ -226,7 +228,8 @@ class PreProcessing:
             variable_names= self.variable_names,
             target_grid= self.target_grid,
             variable_attrs= self.variable_attrs,
-            time_chunk=cfg.domain.time_chunk,
+            time_chunk=self.time_chunk,
+            time_shard=self.time_shard,
             clevel=cfg.domain.clevel,
         )
 
@@ -276,8 +279,8 @@ class PreProcessing:
             self.grid_size, self.alpha_deg,
         )
         logger.info(
-            "[%s] output: %s (time_chunk=%d)",
-            self.dataset_name, self.zarr_path, self.time_chunk,
+            "[%s] output: %s (time_chunk=%d, time_shard=%s)",
+            self.dataset_name, self.zarr_path, self.time_chunk, self.time_shard,
         )
 
     def __call__(self):

@@ -103,6 +103,55 @@ def test_write_and_gaps(tmp_path, target_grid, time_vector):
     ds.close()
 
 
+def test_sharded_write(tmp_path, target_grid, time_vector):
+    ''' 1-step chunks grouped into 4-step shards: layout on disk, and partial shard writes
+    (a write covering only part of a shard must keep what's already in it) '''
+    zarr_path = tmp_path / "test.zarr"
+    variable_names = ["sst"]
+
+    writer = ZarrDataWriter(
+        zarr_path=str(zarr_path),
+        time_vector=time_vector,
+        variable_names=variable_names,
+        target_grid=target_grid,
+        time_chunk=1,
+        time_shard=4,
+    )
+    # shard 0 = steps 0..3, filled by two separate writes; steps 4..5 and 9 left as gaps
+    writer.write(_make_chunk(time_vector[0:2], variable_names, target_grid, 1.0))
+    writer.write(_make_chunk(time_vector[2:4], variable_names, target_grid, 2.0))
+    writer.write(_make_chunk(time_vector[6:9], variable_names, target_grid, 3.0))
+    writer.close()
+
+    ds = xr.open_zarr(str(zarr_path), consolidated=True)
+    assert ds["sst"].encoding["chunks"] == (1, 4, 4)
+    assert tuple(ds["sst"].encoding["shards"]) == (4, 4, 4)
+    assert ds["missing_mask"].encoding["chunks"] == (len(time_vector),)
+    assert ds["lat"].encoding["chunks"] == ds["lat"].shape
+    assert ds["lon"].encoding["chunks"] == ds["lon"].shape
+
+    values = ds["sst"].values[:, 0, 0]
+    expected = np.array([1, 1, 2, 2, np.nan, np.nan, 3, 3, 3, np.nan], dtype=np.float32)
+    np.testing.assert_array_equal(values, expected)
+    np.testing.assert_array_equal(ds["missing_mask"].values, np.isnan(expected))
+    ds.close()
+
+    # one file per shard (3 shards for 10 steps), not one per 1-step chunk
+    assert len(list((zarr_path / "sst" / "c").iterdir())) == 3
+
+
+def test_time_shard_must_be_multiple_of_chunk(tmp_path, target_grid, time_vector):
+    with pytest.raises(ValueError, match="multiple"):
+        ZarrDataWriter(
+            zarr_path=str(tmp_path / "test.zarr"),
+            time_vector=time_vector,
+            variable_names=["sst"],
+            target_grid=target_grid,
+            time_chunk=3,
+            time_shard=4,
+        )
+
+
 def test_write_preserves_variable_attrs(tmp_path, target_grid, time_vector):
     zarr_path = tmp_path / "test.zarr"
     variable_names = ["sst"]
@@ -222,6 +271,18 @@ def test_reopen_validates_configuration(tmp_path, target_grid, time_vector):
             variable_names=variable_names,
             target_grid=other_grid,
             time_chunk=4,
+        )
+
+    # reopening with a different chunk/shard layout (e.g. time_chunk/time_shard changed in
+    # the config between runs) should raise instead of silently keeping the old layout
+    with pytest.raises(ValueError, match="chunk layout"):
+        ZarrDataWriter(
+            zarr_path=str(zarr_path),
+            time_vector=time_vector,
+            variable_names=variable_names,
+            target_grid=target_grid,
+            time_chunk=1,
+            time_shard=4,
         )
 
     # reopening with the same CRS origin but a different lat/lon grid (e.g. alpha_deg

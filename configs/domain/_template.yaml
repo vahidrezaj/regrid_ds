@@ -27,8 +27,12 @@ alpha_deg: 0.0
 from_to: ["2013-10-01T01:00", "2026-01-01T01:00"]
 ts: 1
 
-# Zarr writer: chunk size along time (hours) and Blosc compression level.
-time_chunk: 24
+# Zarr writer: chunk size along time (hours) -- the smallest unit a reader decompresses;
+# shard size along time (hours) -- chunks grouped into one file on disk, must be a multiple
+# of time_chunk (null = no sharding, one file per chunk); Blosc compression level.
+# 1-hour chunks suit random-access training reads; weekly shards keep the file count low.
+time_chunk: 1
+time_shard: 168
 clevel: 3
 
 # Per-dataset filename-match tokens: one file queue per token, matched anywhere in the

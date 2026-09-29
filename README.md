@@ -47,7 +47,10 @@ python run.py dataset=hbm_bathymetry mode=dry_run     # just print a summary, do
 python run.py dataset=hbm_forcing mode=check          # check an already-saved dataset is valid
 python run.py dataset=nemo_ocean domain=nordic_seas
 python run.py dataset=nemo_forcing domain=nordic_seas
+python run.py dataset=hbm_ocean mode=rechunk          # convert a saved store to the configured chunk/shard layout
 ```
+
+Zarr layout is set per domain: `time_chunk` (hours per chunk) and `time_shard` (hours per file on disk, a multiple of `time_chunk`).
 
 To generate a quick before/after plot for one dataset:
 
@@ -68,6 +71,7 @@ ruff check .
 - `src/readers.py` — reading source files (plain NetCDF, GeoTIFF). Dataset-agnostic.
 - `src/writers.py` — writing the Zarr output store / static `.npz` files. Also dataset-agnostic.
 - `src/validate.py` — read-only checks against a finished dataset.
+- `src/rechunk.py` — rewrites a saved Zarr store with the current chunk/shard layout (`mode=rechunk`).
 - `src/regridder.py` — dataset-agnostic file queues, checkpointing, and the main read -> regrid -> write pipeline loop. Source-specific reading (HBM, NEMO, ...) lives in `dataset.reader_fn`.
 - `src/nemo_reader.py` — NEMO curvilinear-grid reader: colocates `ssh`/`ubar`/`vbar` onto a common T-point grid and unrotates `ubar`/`vbar` from grid-relative to true east/north before regridding.
 - `configs/` — Hydra configs: `dataset/` (what to read) and `domain/` (where/when — grid, region, time range).

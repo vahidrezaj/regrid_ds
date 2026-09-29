@@ -76,6 +76,8 @@ def validate_zarr(cfg, out_path: Path) -> bool:
     )
     grid_size = cfg.domain.grid_size
     time_chunk = cfg.domain.time_chunk
+    time_shard = cfg.domain.get("time_shard", None)
+    expected_shards = (time_shard, grid_size, grid_size) if time_shard else None
 
     with xr.open_zarr(zarr_path, consolidated=True) as ds:
         ok &= _ok(
@@ -120,13 +122,15 @@ def validate_zarr(cfg, out_path: Path) -> bool:
                 da.dtype == np.float32 and da.dims == ("time", "y", "x"),
                 "%s: dtype/dims correct (%s, %s)", var, da.dtype, da.dims,
             )
-            chunksize = getattr(da.data, "chunksize", None)
-            if chunksize is not None:
-                ok &= _ok(
-                    chunksize == (time_chunk, grid_size, grid_size),
-                    "%s: chunk shape %s matches config (time_chunk=%d)",
-                    var, chunksize, time_chunk,
-                )
+            # on-disk layout from the encoding (dask chunks don't reflect shards)
+            chunks = tuple(da.encoding.get("chunks") or ())
+            shards = da.encoding.get("shards")
+            shards = tuple(shards) if shards else None
+            ok &= _ok(
+                chunks == (time_chunk, grid_size, grid_size) and shards == expected_shards,
+                "%s: chunks %s / shards %s match config (time_chunk=%d, time_shard=%s)",
+                var, chunks, shards, time_chunk, time_shard,
+            )
 
         if "spatial_ref" in ds.coords:
             crs_attrs = ds["spatial_ref"].attrs

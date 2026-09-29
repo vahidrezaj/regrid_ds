@@ -1,7 +1,7 @@
 '''
 Hydra entry point: read the composed config and, depending on `mode`, either
-run the dataset's preprocessing pipeline, log a dry-run summary, or check
-already-saved output on disk.
+run the dataset's preprocessing pipeline, log a dry-run summary, check
+already-saved output on disk, or rechunk it to the configured layout.
 '''
 
 import sys
@@ -10,9 +10,10 @@ import hydra
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
+from rechunk import rechunk_output
 from validate import validate_output
 
-MODES = ("run", "dry_run", "check")
+MODES = ("run", "dry_run", "check", "rechunk")
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="config")
@@ -28,6 +29,11 @@ def main(cfg: DictConfig):
         # read-only: doesn't need source data
         ok = validate_output(cfg)
         sys.exit(0 if ok else 1)
+
+    if mode == "rechunk":
+        # only touches saved output: doesn't need source data
+        rechunk_output(cfg)
+        return
 
     preproc_factory = instantiate(cfg.domain.preproc_cls)
     preproc = preproc_factory(cfg)

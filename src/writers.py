@@ -67,7 +67,12 @@ class ZarrDataWriter:
         entry here, its data is stored under `store_name` instead of `source_name`, and these
         attrs are used verbatim instead of `ds[var].attrs`
     time_chunk : int, default 24
-        Number of timesteps per Zarr chunk along the time axis.
+        Number of timesteps per Zarr chunk along the time axis: the smallest unit a reader
+        decompresses.
+    time_shard : int or None, default None
+        Number of timesteps per Zarr v3 shard (one file on disk holding
+        `time_shard // time_chunk` chunks, each readable on its own). Must be a multiple of
+        `time_chunk`. None disables sharding (one file per chunk).
     clevel : int, default 3
         Blosc/zstd compression level.
     dtype : np.floating, default np.float32
@@ -90,6 +95,7 @@ class ZarrDataWriter:
         target_grid,
         variable_attrs=None,
         time_chunk=24,
+        time_shard=None,
         clevel=3,
         dtype=np.float32,
     ):
@@ -98,6 +104,10 @@ class ZarrDataWriter:
                 "dtype must be floating-point: unwritten cells are read back "
                 "as fill_value=NaN"
             )
+        if time_shard is not None and time_shard % time_chunk != 0:
+            raise ValueError(
+                f"time_shard ({time_shard}) must be a multiple of time_chunk ({time_chunk})"
+            )
 
         self.zarr_path = zarr_path
         self.time_vector = np.asarray(time_vector)
@@ -105,6 +115,7 @@ class ZarrDataWriter:
         self.grid = target_grid
         self.variable_attrs = variable_attrs or {}
         self.time_chunk = time_chunk
+        self.time_shard = time_shard
         self.clevel = clevel
         self.dtype = dtype
 
@@ -159,6 +170,18 @@ class ZarrDataWriter:
             if existing.sizes["y"] != h or existing.sizes["x"] != w:
                 raise ValueError(
                     f"grid shape mismatch with existing store at {self.zarr_path}"
+                )
+
+            # resuming with a changed layout would silently keep the store's old one
+            store_enc = existing[self._store_name[self.variable_names[0]]].encoding
+            store_shards = store_enc.get("shards")
+            store_shards = tuple(store_shards) if store_shards else None
+            new_shards = (self.time_shard, h, w) if self.time_shard else None
+            if tuple(store_enc["chunks"]) != (self.time_chunk, h, w) or store_shards != new_shards:
+                raise ValueError(
+                    f"chunk layout mismatch with existing store at {self.zarr_path}: "
+                    f"chunks={store_enc['chunks']}, shards={store_enc.get('shards')} vs "
+                    f"time_chunk={self.time_chunk}, time_shard={self.time_shard}"
                 )
 
             existing_crs = existing["spatial_ref"].attrs
@@ -241,13 +264,16 @@ class ZarrDataWriter:
             shuffle="bitshuffle",
         )
 
+        # dask chunks must line up with the on-disk file unit (shard if sharded, else chunk)
+        file_chunk = self.time_shard or self.time_chunk
+
         # lazy initailization:
         encoding = {}
         for var in self.variable_names:
             store_name = self._store_name[var]
             ds[store_name] = (
                 ("time", "y", "x"),
-                da.empty((nt, h, w), chunks=(self.time_chunk, h, w), dtype=self.dtype),
+                da.empty((nt, h, w), chunks=(file_chunk, h, w), dtype=self.dtype),
                 {"grid_mapping": "spatial_ref"},
             )
             encoding[store_name] = {
@@ -255,17 +281,24 @@ class ZarrDataWriter:
                 "compressors": [compressor],
                 "fill_value": np.nan,
             }
+            if self.time_shard:
+                encoding[store_name]["shards"] = (self.time_shard, h, w)
 
         # True  = timestamp has not been written
         # False = timestamp has been written
+        # (1-D and tiny, one bool per timestep: a single chunk, like the time coordinate)
         ds["missing_mask"] = (
             "time",
-            da.empty(nt, chunks=(self.time_chunk,), dtype=bool),
+            da.empty(nt, chunks=(nt,), dtype=bool),
         )
         encoding["missing_mask"] = {
-            "chunks": (self.time_chunk,),
+            "chunks": (nt,),
             "fill_value": True,
         }
+
+        # 2-D coords: one chunk each (zarr would otherwise auto-split them into several files)
+        encoding["lat"] = {"chunks": (h, w)}
+        encoding["lon"] = {"chunks": (h, w)}
 
         # Create only the Zarr structure/metadata:
         ds.to_zarr(
