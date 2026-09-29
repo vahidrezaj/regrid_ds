@@ -325,6 +325,19 @@ class RegridPipeline:
             self._masks_cache[region_idx] = (src_mask, tgt_mask, is_explicit)
         return self._masks_cache[region_idx]
 
+    @property
+    def land_mask(self):
+        '''
+        Target-grid land mask (True = land), from the cached region masks: a cell
+        is ocean if any region says so, matching the `combine_first` mosaic.
+        None if no region has a mask (e.g. `use_mask=False`), or before the first call.
+        '''
+        target_masks = [m[1] for m in self._masks_cache.values() if m[1] is not None]
+        if not target_masks:
+            return None
+        ocean = reduce(np.logical_or, (np.asarray(m) > 0.5 for m in target_masks))
+        return ~ocean
+
     def _build_regridder(self, ds_source, interp_method, masks, extrap_method):
         '''
         Build one `xe.Regridder` from `ds_source` (already restricted to one

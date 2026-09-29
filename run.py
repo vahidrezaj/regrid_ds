@@ -10,10 +10,11 @@ import hydra
 from hydra.utils import instantiate
 from omegaconf import DictConfig
 
+from fill_gaps import fill_gaps_output
 from rechunk import rechunk_output
-from validate import validate_output
+from output_validation import validate_output
 
-MODES = ("run", "dry_run", "check", "rechunk")
+MODES = ("run", "dry_run", "check", "rechunk", "fill_gaps")
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="config")
@@ -33,6 +34,11 @@ def main(cfg: DictConfig):
     if mode == "rechunk":
         # only touches saved output: doesn't need source data
         rechunk_output(cfg)
+        return
+
+    if mode == "fill_gaps":
+        # only touches saved output: doesn't need source data
+        fill_gaps_output(cfg)
         return
 
     preproc_factory = instantiate(cfg.domain.preproc_cls)

@@ -95,7 +95,8 @@ def validate_zarr(cfg, out_path: Path) -> bool:
         )
 
         missing = set(expected_vars) - set(ds.data_vars)
-        extra = set(ds.data_vars) - set(expected_vars) - {"missing_mask"}
+        # land_mask (use_mask datasets) / interp_mask (fill_gaps.py) -- allowed, not required
+        extra = set(ds.data_vars) - set(expected_vars) - {"missing_mask", "land_mask", "interp_mask"}
         ok &= _ok(not missing, "no missing variables (expected %s)", expected_vars)
         if extra:
             _warn("unexpected extra variable(s) in store: %s", sorted(extra))
@@ -195,8 +196,8 @@ def validate_npz(cfg, out_path: Path) -> bool:
 
     grid_size = cfg.domain.grid_size
     expected_keys = set(expected_vars) | {"lat", "lon", "y", "x", "crs"}
-    # alpha_ref is only saved when the grid is rotated (see writers.py) -- allowed, not required
-    optional_keys = {"alpha_ref"}
+    # alpha_ref (rotated grids) / land_mask (use_mask datasets) -- allowed, not required
+    optional_keys = {"alpha_ref", "land_mask"}
 
     with np.load(npz_path, allow_pickle=True) as payload:
         missing = expected_keys - set(payload.files)

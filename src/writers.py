@@ -138,6 +138,8 @@ class ZarrDataWriter:
 
         self.store = zarr.open_group(self.zarr_path, mode="a")
 
+        self._has_land_mask = "land_mask" in self.store
+
         # most recently written (time, {var: values}), or None if nothing has been written yet
         # used for time interpolation when enabled in config
         written = ~np.asarray(self.store["missing_mask"][:], dtype=bool)
@@ -368,6 +370,25 @@ class ZarrDataWriter:
         if attrs_changed:
             # consolidated metadata to update attrs from its original file
             zarr.consolidate_metadata(self.zarr_path)
+
+    def write_land_mask(self, land_mask):
+        '''
+        Save the static (y, x) land mask (True = land)
+        No-op if `land_mask` is None or the store already has one.
+        '''
+        if land_mask is None or self._has_land_mask:
+            return
+        xr.Dataset({
+            "land_mask": (("y", "x"), np.asarray(land_mask, dtype=bool), {
+                "long_name": "land mask",
+                "description": "True = land (or outside source coverage), "
+                               "same mask used to NaN out land in the data variables",
+            }),
+        }).to_zarr(
+            self.zarr_path, mode="a", consolidated=True,
+            encoding={"land_mask": {"chunks": land_mask.shape}},
+        )
+        self._has_land_mask = True
 
     def close(self):
         '''No-op in the current impelmentation:

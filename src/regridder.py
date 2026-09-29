@@ -323,8 +323,9 @@ class PreProcessing:
             ds = self._fill_time_gaps(ds)
             regrid_time = monotonic()
 
-            # write Zarr dataset:
+            # write Zarr dataset (+ static land mask, once):
             self.writer.write(ds)
+            self.writer.write_land_mask(self.regrid_pipeline.land_mask)
             write_time = monotonic()
 
             # update avail_files and chekpoint
@@ -435,6 +436,9 @@ class PreProcessing:
             self._store_name(var): np.asarray(ds[var].values)
             for var in self.variable_names
         }
+        land_mask = self.regrid_pipeline.land_mask
+        if land_mask is not None:
+            arrays["land_mask"] = land_mask
         save_static_npz(self.npz_path, arrays, self.target_grid)
 
     def _store_name(self, var):

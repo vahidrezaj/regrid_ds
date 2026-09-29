@@ -70,7 +70,7 @@ ruff check .
 - `src/grid_interp.py` — builds the target grid and does the actual regridding + vector rotation. Not tied to HBM specifically.
 - `src/readers.py` — reading source files (plain NetCDF, GeoTIFF). Dataset-agnostic.
 - `src/writers.py` — writing the Zarr output store / static `.npz` files. Also dataset-agnostic.
-- `src/validate.py` — read-only checks against a finished dataset.
+- `src/output_validation.py` — read-only checks against a finished dataset.
 - `src/rechunk.py` — rewrites a saved Zarr store with the current chunk/shard layout (`mode=rechunk`).
 - `src/regridder.py` — dataset-agnostic file queues, checkpointing, and the main read -> regrid -> write pipeline loop. Source-specific reading (HBM, NEMO, ...) lives in `dataset.reader_fn`.
 - `src/nemo_reader.py` — NEMO curvilinear-grid reader: colocates `ssh`/`ubar`/`vbar` onto a common T-point grid and unrotates `ubar`/`vbar` from grid-relative to true east/north before regridding.
