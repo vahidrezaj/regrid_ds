@@ -1,7 +1,7 @@
 name: hbm_bathymetry
 source: hbm
 
-folder: "H:/dmi/bathymetry"
+folder: "${hbm_root}/bathymetry"
 variable_names: [level]
 
 # Optional new names/attrs:

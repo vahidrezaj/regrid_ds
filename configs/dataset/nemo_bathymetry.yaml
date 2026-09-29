@@ -1,7 +1,7 @@
 name: nemo_bathymetry
 source: nemo
 
-folder: "H:/NordicSeas/ocean"
+folder: "${nemo_root}/ocean"
 variable_names: [bathy_metry]
 
 # Optional new names/attrs:

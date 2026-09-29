@@ -7,7 +7,8 @@ name: hbm_ocean
 # Prefix of `name`, stripped off for output filenames (the output folder still gets it).
 source: hbm
 
-# Where the source files live.
+# Where the source files live. Usually under a per-source root from config.yaml
+# (e.g. ${hbm_root}), so the same config works on every machine.
 folder: "/path/to/source/data"
 
 # Source variable names to read and regrid.

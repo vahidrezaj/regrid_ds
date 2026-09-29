@@ -1,10 +1,10 @@
 # regrid_ds
 
-Tools to take ocean and weather data (currents, winds, water temperature, bathymetry) from different sources and grids, and put it all onto one common grid, at one common resolution. The result is saved as Zarr files that are ready to feed into a model.
+Tools to take ocean and weather data (currents, winds, water temperature, bathymetry) from different sources and grids, and put it all onto one common azimuthal equidistant grid, at one common resolution. The result is saved as Zarr files for training ocean dynamic neural operators.
 
 ![Baltic Sea HBM ocean temperature, regridded](figures/baltic_sea_hbm_ocean_temp.png)
 
-Built around two data sources so far: the Danish Meteorological Institute's HBM model output for the Baltic Sea, and NEMO (Nordic Seas) ocean output + ERA5 atmospheric forcing. The shared regrid/write/validate machinery is dataset-agnostic -- adding a data source only means adding its own reader (a function like `readers.read_nc`, or a small module like `nemo_reader.py` when the source needs extra physics, e.g. unrotating a curvilinear grid's vectors) plus config.
+The domain window can be repositioned by changing the center location (lat_0, lon_0) in the domain config.
 
 ## What it does, step by step
 
@@ -25,24 +25,13 @@ There's also a small script to plot a "before and after" map for a single timest
 conda env create -f environment.yml   # recommended, includes xesmf/esmf
 ```
 
-or, if you don't need regridding (e.g. just running tests unrelated to it):
-
-```bash
-uv sync
-uv pip install -e ".[dev]"
-```
-
-Each dataset config's `folder:` (and, for NEMO, `reader_fn.domain_cfg_path`) is a
-plain absolute path to that source's data on disk -- edit it directly to point at
-your own copy.
-
 ## Running it
 
-The pipeline is configured with [Hydra](https://hydra.cc), so you pick a dataset and a region ("domain") on the command line:
+The pipeline is configured with Hydra, so you pick a dataset and a region ("domain") on the command line:
 
 ```bash
 python run.py                                        # defaults: hbm_ocean data, Baltic Sea region
-python run.py dataset=hbm_forcing domain=baltic_sea
+python run.py -m dataset=hbm_ocean,hbm_forcing,hbm_bathymetry domain=baltic_sea
 python run.py dataset=hbm_bathymetry mode=dry_run     # just print a summary, don't write anything
 python run.py dataset=hbm_forcing mode=check          # check an already-saved dataset is valid
 python run.py dataset=nemo_ocean domain=nordic_seas
@@ -56,13 +45,6 @@ To generate a quick before/after plot for one dataset:
 
 ```bash
 python domain_vis.py dataset=hbm_ocean
-```
-
-## Testing
-
-```bash
-pytest
-ruff check .
 ```
 
 ## Layout

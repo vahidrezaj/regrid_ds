@@ -1,7 +1,7 @@
 name: nemo_ocean
 source: nemo
 
-folder: "H:/NordicSeas/ocean"
+folder: "${nemo_root}/ocean"
 variable_names: [ssh] # [ssh, ubar, vbar]
 
 # Optional new names/attrs:
