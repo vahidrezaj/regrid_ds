@@ -3,6 +3,10 @@ defaults:
   - domain: baltic_sea
   - _self_
 
+# source data roots, per machine: set HBM_ROOT/NEMO_ROOT env vars, else fall back to the local paths
+hbm_root: ${oc.env:HBM_ROOT,H:/dmi}
+nemo_root: ${oc.env:NEMO_ROOT,H:/NordicSeas}
+
 save_to: data
 output_suffix: ""  # // e.g. "_test2" via CLI override
 output_path: ${save_to}/${dataset.source}_${domain.name}${output_suffix}

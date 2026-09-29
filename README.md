@@ -32,9 +32,10 @@ uv sync
 uv pip install -e ".[dev]"
 ```
 
-Each dataset config's `folder:` (and, for NEMO, `reader_fn.domain_cfg_path`) is a
-plain absolute path to that source's data on disk -- edit it directly to point at
-your own copy.
+Each dataset config's `folder:` sits under a per-source root defined in
+`configs/config.yaml` (`hbm_root`, `nemo_root`). Point them at your own copy by setting
+the `HBM_ROOT`/`NEMO_ROOT` environment variables (e.g. in `~/.bashrc`); unset, they fall
+back to the local `H:/` paths. A one-off override works on the CLI too: `hbm_root=/some/path`.
 
 ## Running it
 

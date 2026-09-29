@@ -1,7 +1,7 @@
 name: nemo_forcing
 source: nemo
 
-folder: "H:/NordicSeas/ECMWF"
+folder: "${nemo_root}/ECMWF"
 variable_names: [msl, u10, v10]
 
 # Optional new names/attrs:

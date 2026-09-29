@@ -90,6 +90,9 @@ class PreProcessing:
         - `domain.time_chunk` / `time_shard` / `clevel` : forwarded to `ZarrDataWriter`
           (`time_shard` optional, null/absent = no sharding).
           Unused when `dataset.static` is `True`.
+        - `domain.time_batch` : optional, default None. Max source time steps regridded and
+          written at once, so peak memory is bounded regardless of how long each file is.
+          `null` = whole file at once.
         - `output_path` : base directory for the checkpoint file and Zarr store /
           `.npz` file.
         - `verbose` : bool, default `False`. `True` raises the module logger to
@@ -218,6 +221,13 @@ class PreProcessing:
         self.zarr_path = self.out_path / f"{self.dataset_name}.zarr"
         self.time_chunk = cfg.domain.time_chunk
         self.time_shard = cfg.domain.get("time_shard", None)
+        # source time steps regridded + written at once (bounds peak memory), None = whole file
+        self.time_batch = cfg.domain.get("time_batch", None)
+        if self.time_batch is not None:
+            self.time_batch = int(self.time_batch)
+            if self.time_batch < 1:
+                raise ValueError(f"time_batch must be >= 1 or null, got {self.time_batch}")
+
         if dry_run:
             # no need to initialize ZarrDataWriter. skip creating/opening Zarr fole on disk
             return
@@ -313,19 +323,39 @@ class PreProcessing:
             if time.size == 0:
                 # this file doesn't have data in the range of time_vector
                 logger.debug("[%s] skipping %s (outside time range)", self.dataset_name, files)
+                for src in ds_list:
+                    src.close()
                 self.avail_files = [row[1:] for row in self.avail_files]
                 self._update_cp()
                 continue
 
-            # regridding into the target grid:
-            ds = self.regrid_pipeline(ds_list, time_mask)
-            # fill gaps left by a source coarser than domain.ts (e.g. 3-hourly on an hourly grid):
-            ds = self._fill_time_gaps(ds)
-            regrid_time = monotonic()
+            # regrid + write in time batches, so memory doesn't scale with file length
+            regrid_s = write_s = 0.0
+            in_range = np.flatnonzero(time_mask)
+            batch = self.time_batch or in_range.size
+            for b0 in range(0, in_range.size, batch):
+                batch_mask = np.zeros_like(time_mask)
+                batch_mask[in_range[b0:b0 + batch]] = True
+                t0 = monotonic()
 
-            # write Zarr dataset (+ static land mask, once):
-            self.writer.write(ds)
-            self.writer.write_land_mask(self.regrid_pipeline.land_mask)
+                # regridding into the target grid:
+                ds = self.regrid_pipeline(ds_list, batch_mask)
+
+                # fill gaps left by a source coarser than domain.ts
+                # (e.g. 3-hourly on an hourly grid)
+                ds = self._fill_time_gaps(ds)
+                t1 = monotonic()
+
+                # write Zarr dataset (+ static land mask, once):
+                self.writer.write(ds)
+                self.writer.write_land_mask(self.regrid_pipeline.land_mask)
+                del ds
+                regrid_s += t1 - t0
+                write_s += monotonic() - t1
+
+            for src in ds_list:
+                src.close()
+            del ds_list
             write_time = monotonic()
 
             # update avail_files and chekpoint
@@ -346,8 +376,7 @@ class PreProcessing:
             )
             logger.debug(
                 "[%s] step timings: read %.1fs, regrid %.1fs, write %.1fs",
-                self.dataset_name, read_time - iter_start,
-                regrid_time - read_time, write_time - regrid_time,
+                self.dataset_name, read_time - iter_start, regrid_s, write_s,
             )
 
         # everything completed successfully, so let's delete cp file :)
