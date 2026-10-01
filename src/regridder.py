@@ -3,17 +3,17 @@ Dataset-agnostic read -> regrid -> write preprocessing class. Source-specific lo
 (HBM, NEMO, ...) lives entirely in each source's `dataset.reader_fn`.
 '''
 
-from pathlib import Path
-from datetime import date, timedelta
-from time import monotonic
 import json
 import logging
 import os
+from datetime import datetime, timedelta
+from pathlib import Path
+from time import monotonic
 
-from hydra.utils import instantiate
-from omegaconf import OmegaConf
 import numpy as np
 import xarray as xr
+from hydra.utils import instantiate
+from omegaconf import OmegaConf
 
 from grid_interp import RegridPipeline, create_local_metric_grid
 from writers import ZarrDataWriter, save_static_npz
@@ -62,6 +62,11 @@ class PreProcessing:
           filename (`ocean.zarr` rather than `hbm_ocean.zarr`) -- source disambiguation
           lives in `output_path` instead (`${dataset.source}_${domain.name}`).
         - `dataset.file_ext` : source file extension to glob for, default `".nc"`.
+        - `dataset.file_batch` : optional, default 1. Files popped from each queue per
+          iteration, read and concatenated along time before regridding + writing. Use it
+          for datasets split into many short files (e.g. hourly), so each Zarr shard is
+          rewritten once per batch instead of once per file. The checkpoint advances one
+          batch at a time.
         - `dataset.static` : bool, default `False`. `True` marks a time-invariant
           source (e.g. a bathymetry raster): no `time_vector`/`ZarrDataWriter`/
           per-file checkpoint, just one regrid, saved to a `.npz` file. See
@@ -135,6 +140,8 @@ class PreProcessing:
         self.variable_attrs = _to_plain(cfg.dataset.get("variable_attrs", None))
         self.static = bool(cfg.dataset.get("static", False))
         file_ext = cfg.dataset.get("file_ext", ".nc")
+        # files read + regridded + written per iteration (see _read_batch)
+        self.file_batch = max(1, int(cfg.dataset.get("file_batch", None) or 1))
 
         # init checkpoint with available files (time-series datasets only):
         self.cp_path = self.out_path / f"checkpoint_{self.dataset_name}.tmp"
@@ -222,11 +229,8 @@ class PreProcessing:
         self.time_chunk = cfg.domain.time_chunk
         self.time_shard = cfg.domain.get("time_shard", None)
         # source time steps regridded + written at once (bounds peak memory), None = whole file
-        self.time_batch = cfg.domain.get("time_batch", None)
-        if self.time_batch is not None:
-            self.time_batch = int(self.time_batch)
-            if self.time_batch < 1:
-                raise ValueError(f"time_batch must be >= 1 or null, got {self.time_batch}")
+        time_batch = cfg.domain.get("time_batch", None) or 0
+        self.time_batch = int(time_batch) if time_batch > 0 else None
 
         if dry_run:
             # no need to initialize ZarrDataWriter. skip creating/opening Zarr fole on disk
@@ -289,14 +293,15 @@ class PreProcessing:
             self.grid_size, self.alpha_deg,
         )
         logger.info(
-            "[%s] output: %s (time_chunk=%d, time_shard=%s)",
+            "[%s] output: %s (time_chunk=%d, time_shard=%s, time_batch=%s, file_batch=%d)",
             self.dataset_name, self.zarr_path, self.time_chunk, self.time_shard,
+            self.time_batch, self.file_batch,
         )
 
     def __call__(self):
         ''' read -> regrid -> write ; static datasets run once, others loop per file '''
         print('='*80)
-        print(' '*20, f'[{self.dataset_name}] -- {date.today().isoformat()}')
+        print(' '*30, f'[{self.dataset_name}] -- {datetime.now().astimezone():%Y-%m-%d}')
         print('='*80)
 
         if self.static:
@@ -308,10 +313,10 @@ class PreProcessing:
         processed = 0
         while self.avail_files and self.avail_files[0]:
             iter_start = monotonic()
-            files = [row[0] for row in self.avail_files]
+            files = [row[:self.file_batch] for row in self.avail_files]
 
-            # read files:
-            ds_list = self.loader_fn(files)
+            # read files (file_batch per region, concatenated along time):
+            ds_list = self._read_batch(files)
             read_time = monotonic()
 
             # trim time out of the time_vector range:
@@ -325,7 +330,7 @@ class PreProcessing:
                 logger.debug("[%s] skipping %s (outside time range)", self.dataset_name, files)
                 for src in ds_list:
                     src.close()
-                self.avail_files = [row[1:] for row in self.avail_files]
+                self.avail_files = [row[self.file_batch:] for row in self.avail_files]
                 self._update_cp()
                 continue
 
@@ -358,20 +363,22 @@ class PreProcessing:
             del ds_list
             write_time = monotonic()
 
-            # update avail_files and chekpoint
-            self.avail_files = [row[1:] for row in self.avail_files]
+            # update avail_files and chekpoint, only after the whole batch is written
+            self.avail_files = [row[self.file_batch:] for row in self.avail_files]
             self._update_cp()
 
-            processed += 1
+            processed += len(files[0])
             remaining = len(self.avail_files[0]) if self.avail_files else 0
             elapsed = write_time - start_time
             avg = elapsed / processed
             eta = avg * remaining
             pct = 100 * processed / self.total_files
+            names = ", ".join(
+                row[0].name if len(row) == 1 else f"{row[0].name}..{row[-1].name}" for row in files
+            )
             logger.info(
                 "[%s] %04.1f%% done, %d left | %s | %.1fmin (avg %.1fs/file, elapsed %s, ETA %s)",
-                self.dataset_name, pct, remaining,
-                ", ".join(f.name for f in files), (write_time - iter_start)/60,
+                self.dataset_name, pct, remaining, names, (write_time - iter_start)/60,
                 avg, _fmt_duration(elapsed), _fmt_duration(eta),
             )
             logger.debug(
@@ -385,6 +392,26 @@ class PreProcessing:
             "[%s] completed: %d files processed in %s",
             self.dataset_name, processed, _fmt_duration(monotonic() - start_time),
         )
+
+    def _read_batch(self, files):
+        ''' read `files` (one list per region, same length) and concat each region along time.
+        loader_fn still gets one file per region per call, as with file_batch=1 '''
+        per_file = [self.loader_fn(list(step)) for step in zip(*files)]
+        if len(per_file) == 1:
+            return per_file[0]
+
+        ds_list = []
+        for parts in zip(*per_file):  # regroup by region
+            # NOTE: keep lat/lon etc. from the first file instead of loading + comparing them
+            # across every file. join="exact" still raises if the grid differs.
+            # Duplicate times keep the later file, as overwriting did per file.
+            ds = xr.concat(
+                parts, dim="time", data_vars="minimal", coords="minimal",
+                compat="override", join="exact",
+            ).drop_duplicates("time", keep="last")
+            ds.set_close(lambda parts=parts: [p.close() for p in parts])
+            ds_list.append(ds)
+        return ds_list
 
     def _fill_time_gaps(self, ds):
         '''

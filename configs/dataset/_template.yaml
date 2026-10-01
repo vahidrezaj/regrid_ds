@@ -47,6 +47,11 @@ file_ext: .nc
 # one read+regrid, saved straight to a .npz file.
 static: false
 
+# For datasets split into many short files (e.g. hourly).
+# file_batch > 1 reads a batch of files, then regridded + written together per file_batch
+file_batch: 1
+# file_batch: 168   # one week of hourly files
+
 # Interpolate onto domain.ts's time grid when the source is coarser than it.
 time_interp_method: null
 # time_interp_method: [linear, 3]   # [method, max_gap (hours)]

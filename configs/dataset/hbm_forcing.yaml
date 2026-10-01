@@ -33,6 +33,9 @@ use_mask: false
 pair_vars_list:
   - [var33, var34]
 
+# hourly source files
+file_batch: 365
+
 reader_fn:
   _target_: readers.read_nc
   _partial_: true

@@ -1,5 +1,12 @@
-'''Tests for regridder.PreProcessing's file-queue discovery (domain.file_match glob)'''
+'''Tests for regridder.PreProcessing: file-queue discovery (domain.file_match glob) and
+file_batch batching + checkpoint/resume'''
 
+import json
+
+import numpy as np
+import pytest
+import xarray as xr
+import zarr
 from omegaconf import OmegaConf
 
 from regridder import PreProcessing
@@ -74,3 +81,110 @@ def test_glob_matches_trailing_suffix_filenames(tmp_path):
     pp = PreProcessing(cfg, base_path="")
 
     assert pp.total_files_all == 1
+
+
+N_HOURS = 10
+
+
+def _write_hourly_files(data_dir):
+    ''' one 1-step file per hour (hbm_forcing-style), values unique per hour '''
+    data_dir.mkdir()
+    lat = np.linspace(59.0, 61.0, 9)
+    lon = np.linspace(8.0, 12.0, 9)
+    for h in range(N_HOURS):
+        time = np.array([np.datetime64("2000-01-01T00:00") + np.timedelta64(h, "h")])
+        sst = h + np.add.outer(lat, lon)[None].astype("float32")
+        xr.Dataset(
+            {"sst": (("time", "lat", "lon"), sst)},
+            coords={"time": time, "lat": lat, "lon": lon},
+        ).to_netcdf(data_dir / f"20000101{h:02d}.nc")
+
+
+def _make_run_cfg(data_dir, out_path, file_batch, time_batch):
+    cfg = _make_cfg(data_dir, None, out_path)
+    cfg.mode = "run"
+    cfg.dataset.extrap_method = "nearest_s2d"
+    cfg.dataset.use_mask = False
+    cfg.dataset.file_batch = file_batch
+    cfg.domain.from_to = ["2000-01-01T00:00", "2000-01-01T12:00"]
+    cfg.domain.time_chunk = 1
+    cfg.domain.time_shard = 4
+    cfg.domain.time_batch = time_batch
+    return cfg
+
+
+def _read_store(out_path):
+    store = zarr.open_group(out_path / "ds.zarr", mode="r")
+    return np.asarray(store["sst"][:]), np.asarray(store["missing_mask"][:], dtype=bool)
+
+
+@pytest.fixture
+def hourly_dir(tmp_path):
+    data_dir = tmp_path / "data"
+    _write_hourly_files(data_dir)
+    return data_dir
+
+
+@pytest.fixture
+def reference(hourly_dir, tmp_path):
+    ''' store written one file at a time (file_batch=1) '''
+    out = tmp_path / "ref"
+    PreProcessing(_make_run_cfg(hourly_dir, out, file_batch=1, time_batch=None))()
+    return _read_store(out)
+
+
+@pytest.mark.parametrize("file_batch, time_batch", [(3, None), (3, 2), (4, 4), (50, None)])
+def test_file_batch_matches_per_file_run(hourly_dir, tmp_path, reference, file_batch, time_batch):
+    ''' batching files (incl. a short last batch, and time_batch splitting a batch) must
+    write exactly what the per-file loop writes '''
+    out = tmp_path / "batched"
+    pp = PreProcessing(_make_run_cfg(hourly_dir, out, file_batch, time_batch))
+    pp()
+
+    sst, missing = _read_store(out)
+    ref_sst, ref_missing = reference
+    np.testing.assert_array_equal(missing, ref_missing)
+    assert (~missing).sum() == N_HOURS
+    np.testing.assert_allclose(sst, ref_sst, equal_nan=True)
+    assert not pp.cp_path.exists()
+
+
+def test_file_batch_checkpoint_resume_after_crash_mid_batch(hourly_dir, tmp_path, reference):
+    ''' a crash partway through a batch must leave the checkpoint at the start of that
+    batch (not past it, not mid-batch), and a fresh instance must resume from there '''
+    out = tmp_path / "crash"
+    cfg = _make_run_cfg(hourly_dir, out, file_batch=3, time_batch=2)
+    pp = PreProcessing(cfg)
+
+    # batch 1 = 2 writes ([00,01], [02]); crash on the 2nd write of batch 2 ([05])
+    real_write, calls = pp.writer.write, []
+    def failing_write(ds):
+        calls.append(ds)
+        if len(calls) == 4:
+            raise RuntimeError("simulated crash")
+        real_write(ds)
+    pp.writer.write = failing_write
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        pp()
+
+    remaining = json.loads(pp.cp_path.read_text(encoding="utf-8"))
+    assert [p.split("\\")[-1].split("/")[-1] for p in remaining[0]] == \
+        [f"20000101{h:02d}.nc" for h in range(3, N_HOURS)]
+
+    resumed = PreProcessing(cfg)
+    assert resumed.total_files == N_HOURS - 3
+    resumed()
+
+    sst, missing = _read_store(out)
+    ref_sst, ref_missing = reference
+    np.testing.assert_array_equal(missing, ref_missing)
+    np.testing.assert_allclose(sst, ref_sst, equal_nan=True)
+    assert not resumed.cp_path.exists()
+
+
+@pytest.mark.parametrize("file_batch", [None, 0, -5])
+def test_file_batch_falls_back_to_default(hourly_dir, tmp_path, file_batch):
+    cfg = _make_run_cfg(hourly_dir, tmp_path / "out", file_batch=file_batch, time_batch=None)
+    cfg.mode = "dry_run"
+    assert PreProcessing(cfg).file_batch == 1
