@@ -17,9 +17,9 @@ ts: 1 # // time-step in `hour`
 
 # Zarr writer:
 time_chunk: 1     # // in `hour`, smallest unit a reader decompresses
-time_shard: 168   # // in `hour` (1 week), chunks grouped in one file; multiple of time_chunk
+time_shard: 730   # // in `hour`, chunks grouped in one file
 clevel: 3
-time_batch: 200   # // source time steps regridded + written at once (bounds memory)
+time_batch: 365   # // source time steps regridded + written at once (bounds memory)
 
 # per-dataset filename-match tokens, one file queue per token *Prioritize based on order in list*
 file_match:
