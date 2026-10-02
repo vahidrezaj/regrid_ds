@@ -426,26 +426,21 @@ class RegridPipeline:
             Boolean mask selecting time steps to keep, applied before regridding.
             `None` means the sources have no time axis at all (e.g. a static
             bathymetry raster): each source is regridded as-is, with no
-            time/depth trimming. Otherwise, only the first depth level (if a
-            variable is 3-D) and the time steps selected by `time_mask` are kept
-            before regridding. Variables with no `time` dim (e.g. an embedded
+            time trimming. Otherwise, only the time steps selected by `time_mask`
+            are kept before regridding. Variables with no `time` dim (e.g. an embedded
             `source_mask`, see `_region_masks`) are left untouched either way.
+            Variables must already be (time, y, x) -- level dims are dropped by
+            the reader (see `readers.select_first_level`).
 
         Returns
         -------
         xr.Dataset
             Mosaiced, regridded dataset on the target grid with vectors rotated.
         '''
-        def _select_time_and_depth(da):
-            if "time" not in da.dims:
-                return da
-            return da[time_mask, 0] if da.ndim > 3 else da[time_mask]
-
         ds_regridded = []
         for region_idx, ds in enumerate(ds_list):
             if time_mask is not None:
-                # select the first depth index, if var is 3D
-                ds = ds.map(_select_time_and_depth)
+                ds = ds.isel(time=np.asarray(time_mask))
             ds_regridded.append(self._regrid_region(ds, region_idx))
 
         # mosaic regridded regions by priority, if len(ds_regridded)>1
