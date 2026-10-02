@@ -42,12 +42,11 @@ def _apply_variable_attrs(ds, variable_attrs):
 
 
 def _raw_slice(ds, var, mask):
-    ''' mirror RegridPipeline's per-source time/depth selection, before regridding '''
+    ''' mirror RegridPipeline's per-source time selection, before regridding '''
     da = ds[var]
     if mask is None:
         return da
-    da = da[mask, 0] if da.ndim > 3 else da[mask]
-    return da.isel(time=0)
+    return da[mask].isel(time=0)
 
 
 def _perimeter(lat, lon):

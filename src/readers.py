@@ -36,9 +36,20 @@ def _decode_nonstandard_time(ds, file):
     return ds.assign_coords(time=("time", decoded))
 
 
+def select_first_level(ds):
+    '''
+    Keep only the first level of (time, level, y, x) variables, so every variable with a
+    time axis is (time, y, x).
+    '''
+    level_dims = {
+        da.dims[1] for da in ds.data_vars.values() if "time" in da.dims and da.ndim > 3
+    }
+    return ds.isel({d: 0 for d in level_dims}, drop=True) if level_dims else ds
+
+
 def read_nc(files:list) -> list:
     '''
-    Read nc files
+    Read nc files, keeping only the first level of 4-D variables (see select_first_level)
 
     Returns : list of loaded ds
     '''
@@ -47,6 +58,7 @@ def read_nc(files:list) -> list:
     for file in files:
         ds = xr.open_dataset(file)
         ds = _decode_nonstandard_time(ds, file)
+        ds = select_first_level(ds)
         ds_list.append(ds)
 
     # check time files:
