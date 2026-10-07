@@ -1,5 +1,10 @@
 '''
 regrid one sample of whichever `dataset=` to visually confirm domain/regrdding
+
+optional CLI overrides: (e.g.,)
+    +file=2023071101          file whose name contains this (default: first file)
+    +time=2023-07-11T01:00    nearest timestep in that file (default: random)
+    +var=var1                 plot only this variable (default: all)
 '''
 
 import random
@@ -86,7 +91,8 @@ def _plot_variable(cfg, var, ds, ds_list, mask, target_grid, proj_type):
         )
         ax_source.plot(lon_p, lat_p, color="gray", linewidth=1, transform=ccrs.PlateCarree())
     ax_source.coastlines(resolution="10m")
-    ax_source.set_title("source regions")
+    time = f"  {np.datetime_as_string(da.time.values, unit='m')}" if "time" in da.coords else ""
+    ax_source.set_title(f"source regions{time}")
 
     mesh = ax_regrid.pcolormesh(
         target_grid["lon_b"], target_grid["lat_b"], da.values,
@@ -123,10 +129,14 @@ def main(cfg: DictConfig):
     data_path = Path(cfg.dataset.folder)
     file_ext = cfg.dataset.get("file_ext", ".nc")
     tokens = _to_plain(cfg.domain.file_match.get(cfg.dataset.name)) or [""]
-    files = [
-        min(data_path.glob(("*" + tok + "*" if tok else "*") + file_ext))
-        for tok in tokens
-    ]
+    file_str = str(cfg.get("file") or "")
+    files = []
+    for tok in tokens:
+        pattern = ("*" + tok + "*" if tok else "*") + file_ext
+        matches = [f for f in data_path.glob(pattern) if file_str in f.name]
+        if not matches:
+            raise FileNotFoundError(f"no {pattern} file in {data_path} with {file_str!r} in its name")
+        files.append(min(matches))
 
     proj_type = "aeqd"
     target_grid = create_local_metric_grid(
@@ -160,7 +170,11 @@ def main(cfg: DictConfig):
         ds = regrid_pipeline(ds_list, None)
     else:
         mask = np.zeros(ds_list[0].sizes["time"], dtype=bool)
-        i = random.randrange(len(mask)) # random timestamp
+        if cfg.get("time"):
+            i = ds_list[0].indexes["time"].get_indexer(
+                [np.datetime64(str(cfg.time))], method="nearest")[0]
+        else:
+            i = random.randrange(len(mask)) # random timestamp
         mask[i] = True
         ds = regrid_pipeline(ds_list, mask)
 
@@ -169,7 +183,7 @@ def main(cfg: DictConfig):
     fig_dir = Path("figures")
     fig_dir.mkdir(exist_ok=True)
 
-    for var in variable_names:
+    for var in [cfg.var] if cfg.get("var") else variable_names:
         fig = _plot_variable(cfg, var, ds, ds_list, mask, target_grid, proj_type)
         fig_path = fig_dir / f"{cfg.domain.name}_{cfg.dataset.name}_{var}.png"
         fig.savefig(fig_path, dpi=200)

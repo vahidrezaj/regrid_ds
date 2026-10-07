@@ -326,6 +326,37 @@ def test_call_forces_extrap_none_for_nan_derived_mask_only():
     assert explicit_pipeline._regridder_cache[(0, 0)].extrap_method == "nearest_s2d"
 
 
+def test_call_extrapolates_time_varying_nan_gaps_without_mask():
+    ''' use_mask=False (e.g. hbm_forcing): NaN cells *inside* the source grid are
+    coverage gaps that extrap_method must fill, not leak through bilinear as NaN
+    (the north_sea hbm_forcing bug). The gap can move between timesteps, so each
+    NaN pattern gets its own regridder, and time order must be preserved. '''
+    target_grid = _target_grid()
+    pipeline = _build_pipeline(
+        ["sst"], extrap_method="nearest_s2d", use_mask=False, target_grid=target_grid,
+    )
+    lats = np.arange(*SOURCE_LAT)
+    lons = np.arange(*SOURCE_LON)
+    lon2d, lat2d = np.meshgrid(lons, lats)
+    south = (lat2d < LAT_0) & (lon2d > LON_0)
+    east = lon2d > LON_0 + 3
+    no_gap = np.zeros_like(south)
+
+    gaps, values = [south, east, no_gap, south], [1.0, 2.0, 3.0, 4.0]
+    arr = np.stack([np.where(g, np.nan, v) for g, v in zip(gaps, values)])
+    ds = xr.Dataset(
+        {"sst": (("time", "j", "i"), arr)},
+        coords={"time": np.arange(4), "lat": (("j", "i"), lat2d), "lon": (("j", "i"), lon2d)},
+    )
+    result = pipeline(ds_list=[ds], time_mask=np.ones(4, dtype=bool))
+
+    assert list(result.time.values) == [0, 1, 2, 3]
+    for t, value in enumerate(values):
+        assert np.allclose(result["sst"].isel(time=t).values, value)  # no NaN left
+    assert len(pipeline._regridder_cache) == 3  # one per distinct pattern
+    assert pipeline.land_mask is None
+
+
 def test_call_mosaics_regions_by_priority():
     target_grid = _target_grid()
     pipeline = _build_pipeline(["sst"], target_grid=target_grid)

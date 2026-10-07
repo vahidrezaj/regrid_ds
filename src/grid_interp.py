@@ -1,6 +1,7 @@
 '''
 functions for regriding dataset
 '''
+import hashlib
 from functools import reduce
 
 import numpy as np
@@ -214,6 +215,7 @@ class RegridPipeline:
         as regridding sources, and forcing `extrap_method` to `None`). Set to
         `False` for sources whose NaNs are just incomplete domain coverage, so
         that `extrap_method` fills the gap instead of being silently disabled.
+        The coverage may change over time -> see `_regrid_gaps`.
 
     Per-call input
     --------------
@@ -223,8 +225,9 @@ class RegridPipeline:
     Notes
     -----
     Caching assumes each region's source lat/lon coordinates and land/ocean mask
-    are stable across calls -- only the underlying data values are expected to
-    change between calls.
+    are stable across calls. Only the underlying data values are expected to
+    change between calls. With `use_mask=False`, the NaN pattern may change too:
+    regridders are then cached per pattern instead.
     '''
 
     def __init__(
@@ -374,6 +377,44 @@ class RegridPipeline:
             ignore_degenerate=True,
         )
 
+    def _regrid_gaps(self, ds_source, region_idx, group_idx, interp_method, extrap_method):
+        '''
+        When `use_mask=False`, NaN is a coverage gap, not land.
+        Mask it on the source side only (no target mask) so `extrap_method` fills it.
+        Timesteps are grouped by NaN pattern, with one cached `xe.Regridder` per pattern.
+
+        - Unmasked NaN cells count as valid in ESMF, so bilinear spreads them as NaN and 
+        extrap never runs.
+        - In HBM forcing, the coverage changes over time, so one cached mask per region 
+        isn't enough.
+        '''
+        group_vars = list(ds_source.data_vars)
+        gaps = reduce(np.logical_or, [ds_source[var].isnull() for var in group_vars])
+        has_time = "time" in gaps.dims
+        steps = [gaps.isel(time=t) for t in range(gaps.sizes["time"])] if has_time else [gaps]
+
+        patterns = {}
+        for t, gap in enumerate(steps):
+            key = hashlib.sha1(np.packbits(gap.values)).hexdigest()
+            patterns.setdefault(key, (gap, []))[1].append(t)
+
+        parts, order = [], []
+        for key, (gap, idx) in patterns.items():
+            cache_key = (region_idx, group_idx, key)
+            regridder = self._regridder_cache.get(cache_key)
+            if regridder is None:
+                masks = ((~gap).astype(int), None) if gap.any() else (None, None)
+                regridder = self._build_regridder(ds_source, interp_method, masks, extrap_method)
+                self._regridder_cache[cache_key] = regridder
+
+            source = ds_source[group_vars].isel(time=idx) if has_time else ds_source[group_vars]
+            parts.append(regridder(source, keep_attrs=True))
+            order.extend(idx)
+
+        if len(parts) == 1:
+            return parts[0]
+        return xr.concat(parts, dim="time").isel(time=np.argsort(order))
+
     def _regrid_region(self, ds, region_idx):
         '''
         Regrid one region's dataset onto `self.target_grid`, group by group (see
@@ -393,6 +434,12 @@ class RegridPipeline:
                 {var: ds[var] for var in group_vars},
                 coords={"lat": ds.lat, "lon": ds.lon},
             )
+
+            if not self.use_mask:
+                ds_regridded.append(self._regrid_gaps(
+                    ds_source, region_idx, group_idx, interp_method, extrap_method,
+                ))
+                continue
 
             cache_key = (region_idx, group_idx)
             regridder = self._regridder_cache.get(cache_key)

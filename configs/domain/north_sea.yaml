@@ -1,0 +1,33 @@
+name: north_sea
+
+preproc_cls:
+  _target_: regridder.PreProcessing
+  _partial_: true
+
+# domain_size in km
+domain_size: 1400
+grid_size: 561  # // -> res: 2.5 km
+lat_0: 54
+lon_0: 6.5
+
+from_to:  # // [start included, end excluded)
+  - 2013-10-01T01:00
+  - 2026-01-01T01:00
+ts: 1 # // time-step in `hour`
+
+# Zarr writer:
+time_chunk: 1     # // in `hour`, smallest unit a reader decompresses
+time_shard: 730   # // in `hour`, chunks grouped in one file
+clevel: 3
+time_batch: 365   # // source time steps regridded + written at once (bounds memory)
+
+# per-dataset filename-match tokens, one file queue per token *Prioritize based on order in list*
+file_match:
+  hbm_ocean: [IDW, Wadden, BS, NS]
+  hbm_forcing: null
+  hbm_bathymetry: [bsns_005]
+
+# optional pre-filter on the (already sorted-by-date) file queue: [start, end] (inclusive) // see regridder.py
+file_range:
+  hbm_ocean: null
+  hbm_forcing: null
