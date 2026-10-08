@@ -56,16 +56,16 @@ def _source_ds(variable_names, values_by_time, lat_range=SOURCE_LAT, lon_range=S
 
 
 def _build_pipeline(
-    variable_names, interp_method="bilinear", extrap_method=None,
-    pair_vars_list=None, use_mask=True, target_grid=None,
+    variable_names, interp_method="bilinear", pair_vars_list=None, target_grid=None,
+    land_mask=None, fill_method=None,
 ):
     return RegridPipeline(
         target_grid=target_grid if target_grid is not None else _target_grid(),
         variable_names=variable_names,
         interp_method=interp_method,
-        extrap_method=extrap_method,
         pair_vars_list=pair_vars_list or [],
-        use_mask=use_mask,
+        land_mask=land_mask,
+        fill_method=fill_method,
     )
 
 
@@ -145,32 +145,18 @@ def test_alpha_deg_shifts_cos_sin_at_center_exactly():
 # ---- RegridPipeline._build_var_groups ----------------------------------
 
 def test_build_var_groups_single_group_for_shared_method():
-    groups = RegridPipeline._build_var_groups(["sst", "ssh"], "bilinear", None)
-    assert groups == [(["sst", "ssh"], "bilinear", None)]
+    groups = RegridPipeline._build_var_groups(["sst", "ssh"], "bilinear")
+    assert groups == [(["sst", "ssh"], "bilinear")]
 
 
 def test_build_var_groups_one_group_per_variable_for_interp_list():
-    groups = RegridPipeline._build_var_groups(
-        ["sst", "ssh"], ["bilinear", "nearest_s2d"], None
-    )
-    assert groups == [(["sst"], "bilinear", None), (["ssh"], "nearest_s2d", None)]
-
-
-def test_build_var_groups_extrap_list_forces_per_variable_split():
-    groups = RegridPipeline._build_var_groups(
-        ["sst", "ssh"], "bilinear", ["nearest_s2d", None]
-    )
-    assert groups == [(["sst"], "bilinear", "nearest_s2d"), (["ssh"], "bilinear", None)]
+    groups = RegridPipeline._build_var_groups(["sst", "ssh"], ["bilinear", "nearest_s2d"])
+    assert groups == [(["sst"], "bilinear"), (["ssh"], "nearest_s2d")]
 
 
 def test_build_var_groups_rejects_interp_length_mismatch():
     with pytest.raises(ValueError):
-        RegridPipeline._build_var_groups(["sst", "ssh"], ["bilinear"], None)
-
-
-def test_build_var_groups_rejects_extrap_length_mismatch():
-    with pytest.raises(ValueError):
-        RegridPipeline._build_var_groups(["sst", "ssh"], "bilinear", ["nearest_s2d"])
+        RegridPipeline._build_var_groups(["sst", "ssh"], ["bilinear"])
 
 
 # ---- _rotate_vectors -----------------------------------------------------
@@ -237,129 +223,107 @@ def test_call_per_variable_interp_method_caches_one_regridder_per_group():
     assert np.allclose(result["ssh"].values, 5.0)
 
 
-def test_call_caches_region_mask_and_applies_it_on_every_call():
-    target_grid = _target_grid()
-    pipeline = _build_pipeline(["sst"], target_grid=target_grid)
-
+def _gappy_ds(gaps, values):
+    ''' one timestep per (gap mask, constant value) pair, NaN where the gap mask is True '''
     lats = np.arange(*SOURCE_LAT)
     lons = np.arange(*SOURCE_LON)
     lon2d, lat2d = np.meshgrid(lons, lats)
-    land = lat2d < LAT_0  # "land" mask, stable across calls (see class caching assumption)
-
-    def make_ds(value):
-        arr = np.where(land, np.nan, value)[None, ...]
-        return xr.Dataset(
-            {"sst": (("time", "j", "i"), arr)},
-            coords={"time": [0], "lat": (("j", "i"), lat2d), "lon": (("j", "i"), lon2d)},
-        )
-
-    result1 = pipeline(ds_list=[make_ds(10.0)], time_mask=np.array([True]))
-    assert len(pipeline._masks_cache) == 1
-    cached_masks = pipeline._masks_cache[0]
-
-    result2 = pipeline(ds_list=[make_ds(20.0)], time_mask=np.array([True]))
-    assert len(pipeline._masks_cache) == 1
-    assert pipeline._masks_cache[0] is cached_masks
-
-    for result, value in ((result1, 10.0), (result2, 20.0)):
-        values = result["sst"].values
-        assert np.any(np.isnan(values))  # masked-out "land" cells
-        assert np.any(np.isclose(values[~np.isnan(values)], value))
-
-
-def test_call_uses_embedded_source_mask_instead_of_data_nans():
-    ''' a `source_mask` variable on `ds` (e.g. nemo_reader.py's domain_cfg-derived
-    ocean mask) must be used as-is, even when the data variable itself has no NaN
-    to derive a mask from -- and, since it carries no "time" dim, must survive
-    __call__'s per-timestep slicing untouched (see _select_time_and_depth). '''
-    target_grid = _target_grid()
-    pipeline = _build_pipeline(["sst"], target_grid=target_grid)
-
-    lats = np.arange(*SOURCE_LAT)
-    lons = np.arange(*SOURCE_LON)
-    lon2d, lat2d = np.meshgrid(lons, lats)
-    land = lat2d < LAT_0  # "land" per source_mask only -- sst itself has no NaN
-
-    ds = xr.Dataset(
-        {"sst": (("time", "j", "i"), np.full((1,) + lat2d.shape, 10.0))},
-        coords={"time": [0], "lat": (("j", "i"), lat2d), "lon": (("j", "i"), lon2d)},
-    )
-    ds["source_mask"] = (("j", "i"), ~land)  # True = ocean, no time dim
-
-    result = pipeline(ds_list=[ds], time_mask=np.array([True]))
-
-    values = result["sst"].values
-    assert np.any(np.isnan(values))  # masked out via source_mask despite sst having no NaN
-    assert np.any(np.isclose(values[~np.isnan(values)], 10.0))
-
-
-def test_call_forces_extrap_none_for_nan_derived_mask_only():
-    ''' extrap_method must still be suppressed for a NaN-derived mask (masking
-    and extrapolation both claim the same NaN cells there), but honored when
-    the mask comes from an explicit `source_mask` instead -- see
-    RegridPipeline._regrid_region / _region_masks. '''
-    target_grid = _target_grid()
-    lats = np.arange(*SOURCE_LAT)
-    lons = np.arange(*SOURCE_LON)
-    lon2d, lat2d = np.meshgrid(lons, lats)
-    land = lat2d < LAT_0
-
-    nan_derived_pipeline = _build_pipeline(
-        ["sst"], extrap_method="nearest_s2d", target_grid=target_grid,
-    )
-    ds_nan = xr.Dataset(
-        {"sst": (("time", "j", "i"), np.where(land, np.nan, 10.0)[None, ...])},
-        coords={"time": [0], "lat": (("j", "i"), lat2d), "lon": (("j", "i"), lon2d)},
-    )
-    nan_derived_pipeline(ds_list=[ds_nan], time_mask=np.array([True]))
-    assert nan_derived_pipeline._regridder_cache[(0, 0)].extrap_method is None
-
-    explicit_pipeline = _build_pipeline(
-        ["sst"], extrap_method="nearest_s2d", target_grid=target_grid,
-    )
-    ds_explicit = xr.Dataset(
-        {"sst": (("time", "j", "i"), np.full((1,) + lat2d.shape, 10.0))},
-        coords={"time": [0], "lat": (("j", "i"), lat2d), "lon": (("j", "i"), lon2d)},
-    )
-    ds_explicit["source_mask"] = (("j", "i"), ~land)
-    explicit_pipeline(ds_list=[ds_explicit], time_mask=np.array([True]))
-    assert explicit_pipeline._regridder_cache[(0, 0)].extrap_method == "nearest_s2d"
-
-
-def test_call_extrapolates_time_varying_nan_gaps_without_mask():
-    ''' use_mask=False (e.g. hbm_forcing): NaN cells *inside* the source grid are
-    coverage gaps that extrap_method must fill, not leak through bilinear as NaN
-    (the north_sea hbm_forcing bug). The gap can move between timesteps, so each
-    NaN pattern gets its own regridder, and time order must be preserved. '''
-    target_grid = _target_grid()
-    pipeline = _build_pipeline(
-        ["sst"], extrap_method="nearest_s2d", use_mask=False, target_grid=target_grid,
-    )
-    lats = np.arange(*SOURCE_LAT)
-    lons = np.arange(*SOURCE_LON)
-    lon2d, lat2d = np.meshgrid(lons, lats)
-    south = (lat2d < LAT_0) & (lon2d > LON_0)
-    east = lon2d > LON_0 + 3
-    no_gap = np.zeros_like(south)
-
-    gaps, values = [south, east, no_gap, south], [1.0, 2.0, 3.0, 4.0]
-    arr = np.stack([np.where(g, np.nan, v) for g, v in zip(gaps, values)])
-    ds = xr.Dataset(
+    arr = np.stack([np.where(g(lat2d, lon2d), np.nan, v) for g, v in zip(gaps, values)])
+    return xr.Dataset(
         {"sst": (("time", "j", "i"), arr)},
-        coords={"time": np.arange(4), "lat": (("j", "i"), lat2d), "lon": (("j", "i"), lon2d)},
+        coords={
+            "time": np.arange(len(values)),
+            "lat": (("j", "i"), lat2d), "lon": (("j", "i"), lon2d),
+        },
     )
+
+
+def test_call_nans_land_and_fills_only_ocean_gaps():
+    ''' land (from the shared mask) is NaN even where the source has data, and every
+    other NaN -- here a coverage gap in the source -- is filled '''
+    target_grid = _target_grid()
+    land = target_grid["lon"] < LON_0 - 2
+    pipeline = _build_pipeline(
+        ["sst"], target_grid=target_grid, land_mask=land, fill_method="nearest",
+    )
+    ds = _gappy_ds([lambda lat, lon: (lat < LAT_0) & (lon > LON_0)], [10.0])
+
+    values = pipeline(ds_list=[ds], time_mask=np.array([True]))["sst"].values[0]
+
+    assert land.any() and np.isnan(values[land]).all()
+    assert np.allclose(values[~land], 10.0)
+
+
+def test_valid_mask_excludes_land_and_filled_gaps():
+    ''' valid = real data before filling; a step with a bigger gap shrinks it '''
+    target_grid = _target_grid()
+    lat, lon = target_grid["lat"], target_grid["lon"]
+    land = lon < LON_0 - 2
+    pipeline = _build_pipeline(
+        ["sst"], target_grid=target_grid, land_mask=land, fill_method="nearest",
+    )
+    south = lambda la, lo: (la < LAT_0) & (lo > LON_0)
+    assert pipeline.valid_mask is None
+
+    pipeline(ds_list=[_gappy_ds([south], [10.0])], time_mask=np.array([True]))
+    first = pipeline.valid_mask.copy()
+    assert not first[land].any()
+    assert first[(lat > LAT_0 + 1) & ~land].all()
+    assert not first[(lat < LAT_0 - 1) & (lon > LON_0 + 1)].any()  # filled, not valid
+
+    # same pattern again: unchanged
+    pipeline(ds_list=[_gappy_ds([south], [11.0])], time_mask=np.array([True]))
+    np.testing.assert_array_equal(pipeline.valid_mask, first)
+
+    # a step that also lacks the east: only cells valid in every step are kept
+    east = lambda la, lo: lo > LON_0 + 3
+    pipeline(ds_list=[_gappy_ds([south, east], [1.0, 2.0])], time_mask=np.ones(2, dtype=bool))
+    assert (pipeline.valid_mask <= first).all() and pipeline.valid_mask.sum() < first.sum()
+
+
+def test_valid_mask_not_tracked_without_land_mask():
+    pipeline = _build_pipeline(["sst"], fill_method="nearest")
+    pipeline(ds_list=[_source_ds(["sst"], [1.0])], time_mask=np.array([True]))
+    assert pipeline.valid_mask is None
+
+
+def test_call_without_fill_method_leaves_gaps_but_still_masks_land():
+    target_grid = _target_grid()
+    land = target_grid["lon"] < LON_0 - 2
+    pipeline = _build_pipeline(["sst"], target_grid=target_grid, land_mask=land)
+    ds = _gappy_ds([lambda lat, lon: (lat < LAT_0) & (lon > LON_0)], [10.0])
+
+    values = pipeline(ds_list=[ds], time_mask=np.array([True]))["sst"].values[0]
+
+    assert np.isnan(values[land]).all()
+    assert np.isnan(values[~land]).any()  # the gap is still there
+
+
+def test_call_fills_time_varying_gaps_without_land_mask():
+    ''' no land mask (e.g. hbm_forcing): every NaN is a gap. The gap can move between
+    timesteps (the north_sea hbm_forcing case), so each NaN pattern gets its own fill
+    plan, and time order must be preserved. '''
+    pipeline = _build_pipeline(["sst"], fill_method="nearest")
+    south = lambda lat, lon: (lat < LAT_0) & (lon > LON_0)
+    east = lambda lat, lon: lon > LON_0 + 3
+    no_gap = lambda lat, lon: np.zeros_like(lat, dtype=bool)
+    values = [1.0, 2.0, 3.0, 4.0]
+    ds = _gappy_ds([south, east, no_gap, south], values)
+
     result = pipeline(ds_list=[ds], time_mask=np.ones(4, dtype=bool))
 
     assert list(result.time.values) == [0, 1, 2, 3]
     for t, value in enumerate(values):
         assert np.allclose(result["sst"].isel(time=t).values, value)  # no NaN left
-    assert len(pipeline._regridder_cache) == 3  # one per distinct pattern
-    assert pipeline.land_mask is None
+    assert len(pipeline._regridder_cache) == 1  # one regridder, whatever the NaN pattern
 
 
-def test_call_mosaics_regions_by_priority():
+@pytest.mark.parametrize("fill_method", [None, "nearest"])
+def test_call_mosaics_regions_by_priority(fill_method):
+    ''' with fill on too: filling runs after the mosaic, so region_a's gap is filled by
+    region_b's data, not by extrapolating region_a over it '''
     target_grid = _target_grid()
-    pipeline = _build_pipeline(["sst"], target_grid=target_grid)
+    pipeline = _build_pipeline(["sst"], target_grid=target_grid, fill_method=fill_method)
 
     lats = np.arange(*SOURCE_LAT)
     lons = np.arange(*SOURCE_LON)
@@ -380,6 +344,22 @@ def test_call_mosaics_regions_by_priority():
     assert not np.isnan(values).any()          # region_b fills every gap left by region_a's mask
     assert np.any(np.isclose(values, 100.0))   # region_a (higher priority) wins somewhere
     assert np.any(np.isclose(values, 200.0))   # region_b fills the rest
+
+
+def test_call_cells_outside_a_region_grid_are_nan_not_zero():
+    ''' xesmf's default sets cells outside the source grid to 0; they must be NaN so
+    a smaller, higher-priority region can't overwrite the rest of the mosaic with 0 '''
+    small = _source_ds(["sst"], [100.0], lat_range=(LAT_0, 66, 1), lon_range=SOURCE_LON)
+    full = _source_ds(["sst"], [200.0])
+
+    alone = _build_pipeline(["sst"])(ds_list=[small], time_mask=np.array([True]))
+    values = alone["sst"].values
+    assert np.isnan(values).any() and not np.any(values == 0)
+
+    mosaic = _build_pipeline(["sst"])(ds_list=[small, full], time_mask=np.array([True]))
+    values = mosaic["sst"].values
+    assert np.any(np.isclose(values, 100.0)) and np.any(np.isclose(values, 200.0))
+    assert not np.isnan(values).any()
 
 
 def test_call_rotates_pair_vars_after_regridding():

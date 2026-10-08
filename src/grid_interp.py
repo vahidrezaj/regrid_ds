@@ -1,13 +1,15 @@
 '''
-functions for regriding dataset
+Target grid and regridding: 
+    regrid source regions, mosaic them, mask land, fill gaps and rotate vectors.
 '''
-import hashlib
 from functools import reduce
 
 import numpy as np
 import xarray as xr
 import xesmf as xe
 from pyproj import CRS, Transformer, Proj
+
+from spatial_fill import GapFiller
 
 
 def create_local_metric_grid(
@@ -119,49 +121,6 @@ def create_local_metric_grid(
     return out
 
 
-def _create_masks(use_mask, sample_array, target_grid, thrd_ocean_fraction=0.5,
-                  source_mask=None, extrap_method=None):
-    '''
-    Create source and target mask from `source_mask` if given, else from NaNs in
-    `sample_array`. Returns None, None if neither yields a mask.
-
-    NOTE: `source_mask` lets a caller pass a more reliable mask than data NaNs
-    give -- e.g. NEMO's `top_level`, see `nemo_reader.py`.
-
-    Returns: source_mask, target_mask
-    '''
-    if not use_mask:
-        return None, None
-
-    extrap = None
-    if source_mask is not None:
-        source_mask = source_mask.astype(float)
-        extrap = extrap_method
-    elif sample_array.isnull().any():
-        source_mask = (~sample_array.isnull()).astype(float)
-    else:
-        return None, None
-
-    ds_source = sample_array.to_dataset(name="var")
-
-    ds_target = xr.Dataset(
-        coords={
-            "lat": (("y", "x"), target_grid['lat']),
-            "lon": (("y", "x"), target_grid['lon']),
-        }
-    )
-    regridder = xe.Regridder(
-        ds_source,
-        ds_target,
-        "bilinear",
-        extrap_method=extrap,
-    )
-
-    target_ocean_fraction = regridder(source_mask)
-    target_mask = target_ocean_fraction > thrd_ocean_fraction
-
-    return source_mask.astype(int), target_mask.astype(int)
-
 def _rotate_vectors(ds, pair_vars, target_grid):
     '''
     Rotate vectors
@@ -183,12 +142,10 @@ def _rotate_vectors(ds, pair_vars, target_grid):
 
 class RegridPipeline:
     '''
-    Regrid and mosaic one or more source datasets onto a target grid, then rotate
-    vector variables into the target grid's local basis -- call repeatedly with
-    `ds_list`/`time_mask` (e.g. one call per file in `PreProcessing`'s
-    read/regrid/write loop) to get back a mosaiced, regridded, vector-rotated
-    `xr.Dataset` each time. Caches per-region xesmf regridders and land/ocean
-    masks across those calls instead of rebuilding them every time.
+    Regrid source regions onto the target grid, mosaic them, mask land with NaN,
+    fill remaining gaps, and rotate vectors into the grid's local x/y axes. Built
+    once, called per file.
+    xesmf regridders are cached across calls.
 
     Parameters
     ----------
@@ -201,33 +158,20 @@ class RegridPipeline:
         to all variables via a single shared `xe.Regridder`. See xESMF docs --
         one of 'bilinear', 'conservative', 'conservative_normed', 'patch',
         'nearest_s2d', 'nearest_d2s'.
-    extrap_method : list or str or None
-        Extrapolation method, one per variable if a list. `None` (the default)
-        keeps land/edges as NaN; `nearest_s2d`/`inverse_dist` fill beyond the
-        source domain (e.g. for atmospheric data). Forced to `None` when the
-        region's mask is NaN-derived, not for an explicit `source_mask` -- see
-        `_region_masks`.
     pair_vars_list : list of (str, str)
         (u, v) variable name pairs, already regridded, to rotate from true
         north/east into the target grid's local basis via `_rotate_vectors`.
-    use_mask : bool, default True
-        Whether NaNs in the source are a real land/ocean mask to respect (excluded
-        as regridding sources, and forcing `extrap_method` to `None`). Set to
-        `False` for sources whose NaNs are just incomplete domain coverage, so
-        that `extrap_method` fills the gap instead of being silently disabled.
-        The coverage may change over time -> see `_regrid_gaps`.
+    land_mask : (y, x) bool array or None, default None
+        True = land: set to NaN, never filled (see `land_mask.py`). None = no land (forcing).
+    fill_method : str or None, default None
+        "nearest" or "laplace" (see `spatial_fill.py`). None leaves gaps as NaN.
 
-    Per-call input
-    --------------
-    Each `ds` in `ds_list` may optionally carry a `source_mask` variable, used
-    as the region's land/ocean mask as-is -- see `_region_masks`.
+    Attributes
+    ----------
+    valid_mask : (y, x) bool array or None
+        True where every variable had real (not filled) data in every step so far.
+        Only tracked with a land mask; None for forcing.
 
-    Notes
-    -----
-    Caching assumes each region's source lat/lon coordinates and land/ocean mask
-    are stable across calls. Only the underlying data values are expected to
-    change between calls. With `use_mask=False`, the NaN pattern may change too:
-    regridders are then cached per pattern instead.
     '''
 
     def __init__(
@@ -235,122 +179,43 @@ class RegridPipeline:
         target_grid,
         variable_names,
         interp_method,
-        extrap_method,
         pair_vars_list,
-        use_mask=True,
+        land_mask=None,
+        fill_method=None,
     ):
         self.target_grid = target_grid
         self.variable_names = list(variable_names)
         self.pair_vars_list = pair_vars_list
-        self.use_mask = use_mask
+        self.land_mask = None if land_mask is None else np.asarray(land_mask, dtype=bool)
+        self.gap_filler = GapFiller(self.land_mask, fill_method) if fill_method else None
+        self.valid_mask = None
 
-        # one (group_variable_names, interp_method, extrap_method) tuple per
-        # xe.Regridder to build for each region, computed (and validated) once
-        # here instead of on every call
-        self._var_groups = self._build_var_groups(
-            self.variable_names, interp_method, extrap_method
-        )
+        # (variables, interp_method) per xe.Regridder, checked once here
+        self._var_groups = self._build_var_groups(self.variable_names, interp_method)
 
-        # region_idx -> (source_mask, target_mask, is_explicit)
-        self._masks_cache = {}
         # (region_idx, group_idx) -> xe.Regridder, group_idx indexing self._var_groups
         self._regridder_cache = {}
 
     @staticmethod
-    def _build_var_groups(variable_names, interp_method, extrap_method):
-        '''
-        Precompute the (group_variable_names, interp_method, extrap_method) groups
-        to build one `xe.Regridder` per: a single group covering all variables
-        when `interp_method` is a plain string and `extrap_method` isn't a list,
-        otherwise one single-variable group per entry in `variable_names`. Raises
-        `ValueError` on an interp_method/extrap_method list whose length doesn't
-        match `variable_names`.
-        '''
-        if isinstance(interp_method, str) and not isinstance(extrap_method, list):
-            return [(list(variable_names), interp_method, extrap_method)]
+    def _build_var_groups(variable_names, interp_method):
+        ''' one group for all variables if interp_method is a string, else one per variable '''
+        if isinstance(interp_method, str):
+            return [(list(variable_names), interp_method)]
 
-        if isinstance(interp_method, list):
-            if len(interp_method) != len(variable_names):
-                raise ValueError(
-                    f"interp_method ({len(interp_method)}) must have the same length "
-                    f"as variable_names ({len(variable_names)})"
-                )
-        else:
-            interp_method = [interp_method] * len(variable_names)
-
-        if isinstance(extrap_method, list):
-            if len(extrap_method) != len(variable_names):
-                raise ValueError(
-                    f"extrap_method ({len(extrap_method)}) must have the same length "
-                    f"as variable_names ({len(variable_names)})"
-                )
-        else:
-            extrap_method = [extrap_method] * len(variable_names)
-
-        return [
-            ([var], method, extrap)
-            for var, method, extrap in zip(variable_names, interp_method, extrap_method)
-        ]
-
-    def _region_masks(self, ds, region_idx):
-        '''
-        Return this region's (source_mask, target_mask, is_explicit) triple (see
-        `_create_masks`), building and caching it by `region_idx` the first time
-        this region is seen. Caching assumes each region's land/ocean mask is
-        stable across calls -- see class docstring.
-
-        If `ds` carries a `source_mask` variable, it's used as-is instead of
-        deriving one from NaNs -- see `_create_masks`.
-
-        NOTE: the cached triple's `is_explicit` flag records that. A NaN-derived
-        mask already treats every NaN as land, so extrapolating would contradict
-        it; an explicit mask (e.g. NEMO's domain_cfg one) doesn't, so data NaN
-        elsewhere can still mean extrapolatable gaps -- see `_regrid_region`.
-        '''
-        if region_idx not in self._masks_cache:
-            sample_array = ds[self.variable_names[0]]
-            sample_array = (
-                sample_array.isel(time=0) if "time" in sample_array.dims else sample_array
+        if len(interp_method) != len(variable_names):
+            raise ValueError(
+                f"interp_method ({len(interp_method)}) must have the same length "
+                f"as variable_names ({len(variable_names)})"
             )
-            source_mask = ds.get("source_mask")
-            if source_mask is not None and "time" in source_mask.dims:
-                source_mask = source_mask.isel(time=0)
-            is_explicit = source_mask is not None
-            # extrap_method for whichever group covers variable_names[0]
-            extrap_method = next(
-                extrap for group_vars, _, extrap in self._var_groups
-                if self.variable_names[0] in group_vars
-            )
-            src_mask, tgt_mask = _create_masks(
-                self.use_mask, sample_array, self.target_grid, thrd_ocean_fraction=0.5,
-                source_mask=source_mask, extrap_method=extrap_method,
-            )
-            self._masks_cache[region_idx] = (src_mask, tgt_mask, is_explicit)
-        return self._masks_cache[region_idx]
+        return [([var], method) for var, method in zip(variable_names, interp_method)]
 
-    @property
-    def land_mask(self):
-        '''
-        Target-grid land mask (True = land), from the cached region masks: a cell
-        is ocean if any region says so, matching the `combine_first` mosaic.
-        None if no region has a mask (e.g. `use_mask=False`), or before the first call.
-        '''
-        target_masks = [m[1] for m in self._masks_cache.values() if m[1] is not None]
-        if not target_masks:
-            return None
-        ocean = reduce(np.logical_or, (np.asarray(m) > 0.5 for m in target_masks))
-        return ~ocean
-
-    def _build_regridder(self, ds_source, interp_method, masks, extrap_method):
+    def _build_regridder(self, ds_source, interp_method):
         '''
         Build one `xe.Regridder` from `ds_source` (already restricted to one
         group's variables plus `lat`/`lon`) onto `self.target_grid`. This is the
         (expensive, weight-computing) step `_regrid_region` caches so it only
         runs once per `(region_idx, group_idx)` instead of on every call.
         '''
-        if masks[0] is not None:
-            ds_source["mask"] = (("lat", "lon"), masks[0].values)
-
         if interp_method in ("conservative", "conservative_normed"):
             target_vars = {
                 "lat_b": (("y_b", "x_b"), self.target_grid['lat_b']),
@@ -366,54 +231,10 @@ class RegridPipeline:
                 "lon": (("y", "x"), self.target_grid['lon']),
             },
         )
-        if masks[1] is not None:
-            ds_target["mask"] = (("lat", "lon"), masks[1].values)
-
+        # unmapped_to_nan must be True: the default (0 outside the source) breaks the mosaic
         return xe.Regridder(
-            ds_source,
-            ds_target,
-            interp_method,
-            extrap_method=extrap_method,
-            ignore_degenerate=True,
+            ds_source, ds_target, interp_method, ignore_degenerate=True, unmapped_to_nan=True,
         )
-
-    def _regrid_gaps(self, ds_source, region_idx, group_idx, interp_method, extrap_method):
-        '''
-        When `use_mask=False`, NaN is a coverage gap, not land.
-        Mask it on the source side only (no target mask) so `extrap_method` fills it.
-        Timesteps are grouped by NaN pattern, with one cached `xe.Regridder` per pattern.
-
-        - Unmasked NaN cells count as valid in ESMF, so bilinear spreads them as NaN and 
-        extrap never runs.
-        - In HBM forcing, the coverage changes over time, so one cached mask per region 
-        isn't enough.
-        '''
-        group_vars = list(ds_source.data_vars)
-        gaps = reduce(np.logical_or, [ds_source[var].isnull() for var in group_vars])
-        has_time = "time" in gaps.dims
-        steps = [gaps.isel(time=t) for t in range(gaps.sizes["time"])] if has_time else [gaps]
-
-        patterns = {}
-        for t, gap in enumerate(steps):
-            key = hashlib.sha1(np.packbits(gap.values)).hexdigest()
-            patterns.setdefault(key, (gap, []))[1].append(t)
-
-        parts, order = [], []
-        for key, (gap, idx) in patterns.items():
-            cache_key = (region_idx, group_idx, key)
-            regridder = self._regridder_cache.get(cache_key)
-            if regridder is None:
-                masks = ((~gap).astype(int), None) if gap.any() else (None, None)
-                regridder = self._build_regridder(ds_source, interp_method, masks, extrap_method)
-                self._regridder_cache[cache_key] = regridder
-
-            source = ds_source[group_vars].isel(time=idx) if has_time else ds_source[group_vars]
-            parts.append(regridder(source, keep_attrs=True))
-            order.extend(idx)
-
-        if len(parts) == 1:
-            return parts[0]
-        return xr.concat(parts, dim="time").isel(time=np.argsort(order))
 
     def _regrid_region(self, ds, region_idx):
         '''
@@ -426,44 +247,40 @@ class RegridPipeline:
         if missing:
             raise ValueError(f"Variables {missing} not in dataset")
 
-        masks = self._region_masks(ds, region_idx)
-
         ds_regridded = []
-        for group_idx, (group_vars, interp_method, extrap_method) in enumerate(self._var_groups):
+        for group_idx, (group_vars, interp_method) in enumerate(self._var_groups):
             ds_source = xr.Dataset(
                 {var: ds[var] for var in group_vars},
                 coords={"lat": ds.lat, "lon": ds.lon},
             )
-
-            if not self.use_mask:
-                ds_regridded.append(self._regrid_gaps(
-                    ds_source, region_idx, group_idx, interp_method, extrap_method,
-                ))
-                continue
-
             cache_key = (region_idx, group_idx)
             regridder = self._regridder_cache.get(cache_key)
             if regridder is None:
-                # only suppress extrap for a NaN-derived mask -- see _region_masks
-                build_extrap = None if (masks[0] is not None and not masks[2]) else extrap_method
-                regridder = self._build_regridder(ds_source, interp_method, masks, build_extrap)
+                regridder = self._build_regridder(ds_source, interp_method)
                 self._regridder_cache[cache_key] = regridder
-
-            ds_group = regridder(ds_source[group_vars], keep_attrs=True)
-            if masks[1] is not None:
-                for var in group_vars:
-                    ds_group[var] = ds_group[var].where(masks[1] > 0.5)
-            ds_regridded.append(ds_group)
+            ds_regridded.append(regridder(ds_source[group_vars], keep_attrs=True))
 
         return xr.merge(ds_regridded) if len(ds_regridded) > 1 else ds_regridded[0]
+
+    def _mask_and_fill(self, ds):
+        ''' NaN out land, update valid_mask, then fill the other NaN cells '''
+        for var in self.variable_names:
+            values = ds[var].values
+            if self.land_mask is not None:
+                values = np.where(self.land_mask, np.nan, values)
+                valid = np.isfinite(values).reshape(-1, *self.land_mask.shape).all(axis=0)
+                self.valid_mask = valid if self.valid_mask is None else self.valid_mask & valid
+            if self.gap_filler is not None:
+                values = self.gap_filler(values)
+            ds[var] = ds[var].copy(data=values)
+        return ds
 
     def __call__(self, ds_list, time_mask):
         '''
         Regrid and mosaic `ds_list` (one dataset per region, in PRIORITY order:
         where sources overlap on the target grid, `ds_list[0]`'s data wins, later
         datasets only fill gaps left by earlier ones) onto `self.target_grid`,
-        then rotate `self.pair_vars_list` vector variables into the target grid's
-        local basis.
+        mask land, fill gaps, then rotate `self.pair_vars_list` into the grid's x/y.
 
         Parameters
         ----------
@@ -474,15 +291,13 @@ class RegridPipeline:
             `None` means the sources have no time axis at all (e.g. a static
             bathymetry raster): each source is regridded as-is, with no
             time trimming. Otherwise, only the time steps selected by `time_mask`
-            are kept before regridding. Variables with no `time` dim (e.g. an embedded
-            `source_mask`, see `_region_masks`) are left untouched either way.
-            Variables must already be (time, y, x) -- level dims are dropped by
-            the reader (see `readers.select_first_level`).
+            are kept before regridding. Variables must already be (time, y, x) --
+            level dims are dropped by the reader (see `readers.select_first_level`).
 
         Returns
         -------
         xr.Dataset
-            Mosaiced, regridded dataset on the target grid with vectors rotated.
+            On the target grid: mosaiced, land masked, gaps filled, vectors rotated.
         '''
         ds_regridded = []
         for region_idx, ds in enumerate(ds_list):
@@ -497,6 +312,9 @@ class RegridPipeline:
             )
         else:
             ds = ds_regridded[0]
+
+        # fill before rotating, so u/v are filled as east/north
+        ds = self._mask_and_fill(ds)
 
         # rotate vector variables:
         for pair_vars in self.pair_vars_list:
