@@ -11,7 +11,7 @@ save_to: data
 output_suffix: ""  # // e.g. "_test2" via CLI override
 output_path: ${save_to}/${dataset.source}_${domain.name}${output_suffix}
 verbose: false
-mode: run  # // one of: run, dry_run, check, rechunk, fill_gaps
+mode: run  # // one of: run, land_mask, dry_run, check, rechunk, fill_gaps
 gap_len: null  # // mode=fill_gaps: longest run of missing timesteps to interpolate over
 
 

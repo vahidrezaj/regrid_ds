@@ -5,6 +5,7 @@ optional CLI overrides: (e.g.,)
     +file=2023071101          file whose name contains this (default: first file)
     +time=2023-07-11T01:00    nearest timestep in that file (default: random)
     +var=var1                 plot only this variable (default: all)
+    +prefix='test'            add prefix to the figure file for saving
 '''
 
 import random
@@ -22,6 +23,7 @@ import cartopy.crs as ccrs
 import matplotlib.pyplot as plt
 
 from grid_interp import RegridPipeline, create_local_metric_grid
+from land_mask import load_land_mask
 
 # maps grid_interp's proj4 `proj_type` codes to the matching cartopy projection
 _PROJECTIONS = {
@@ -130,6 +132,7 @@ def main(cfg: DictConfig):
     file_ext = cfg.dataset.get("file_ext", ".nc")
     tokens = _to_plain(cfg.domain.file_match.get(cfg.dataset.name)) or [""]
     file_str = str(cfg.get("file") or "")
+    prefix = f"{cfg['prefix']}_" if cfg.get("prefix") else ""
     files = []
     for tok in tokens:
         pattern = ("*" + tok + "*" if tok else "*") + file_ext
@@ -154,15 +157,21 @@ def main(cfg: DictConfig):
     variable_names = _to_plain(cfg.dataset.variable_names)
     pair_vars_list = _to_plain(cfg.dataset.get("pair_vars_list", []))
     static = bool(cfg.dataset.get("static", False))
-    use_mask = bool(cfg.dataset.get("use_mask", True))
+
+    land_mask = None
+    if cfg.dataset.get("land_mask", False):
+        try:
+            land_mask = load_land_mask(cfg.output_path, target_grid)
+        except FileNotFoundError as err:
+            print(f"no land mask, plotting without it: {err}")
 
     regrid_pipeline = RegridPipeline(
         target_grid=target_grid,
         variable_names=variable_names,
         interp_method=_to_plain(cfg.dataset.interp_method),
-        extrap_method=_to_plain(cfg.dataset.extrap_method),
         pair_vars_list=pair_vars_list,
-        use_mask=use_mask,
+        land_mask=land_mask,
+        fill_method=cfg.dataset.get("fill_method", None),
     )
 
     if static:
@@ -185,7 +194,7 @@ def main(cfg: DictConfig):
 
     for var in [cfg.var] if cfg.get("var") else variable_names:
         fig = _plot_variable(cfg, var, ds, ds_list, mask, target_grid, proj_type)
-        fig_path = fig_dir / f"{cfg.domain.name}_{cfg.dataset.name}_{var}.png"
+        fig_path = fig_dir / f"{prefix}{cfg.domain.name}_{cfg.dataset.name}_{var}.png"
         fig.savefig(fig_path, dpi=200)
         plt.close(fig)
         print(f"saved {fig_path}")

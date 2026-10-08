@@ -14,6 +14,7 @@ import numpy as np
 import xarray as xr
 
 from grid_interp import create_local_metric_grid
+from land_mask import LAND_MASK_FILE, load_land_mask
 from regridder import _to_plain
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,29 @@ def _target_grid(cfg):
         proj_type="aeqd",
         alpha_deg=cfg.domain.get("alpha_deg", 0.0),
     )
+
+
+def _check_masks(cfg, out_path, land, valid):
+    ''' land_mask datasets: both masks saved, land_mask same as land_mask.npz.
+    Returns (ok, land) '''
+    if land is None or valid is None:
+        return _ok(False, "land_mask and valid_mask present"), None
+    land, valid = np.asarray(land, dtype=bool), np.asarray(valid, dtype=bool)
+
+    try:
+        ref = load_land_mask(out_path, _target_grid(cfg))
+        ok = _ok(np.array_equal(land, ref), "land_mask matches %s", LAND_MASK_FILE)
+    except (FileNotFoundError, ValueError) as err:
+        ok = _ok(False, "%s", err)
+    ok &= _ok(not (valid & land).any(), "valid_mask has no land cells")
+    logger.info("  info valid_mask: %d of %d ocean cells", valid.sum(), (~land).sum())
+    return ok, land
+
+
+def _nan_only_on_land(arr, land, filled):
+    ''' land is NaN, and with gap filling nothing else is '''
+    nan = np.isnan(arr)
+    return bool(nan[land].all() and (not filled or not nan[~land].any()))
 
 
 def _sample_time_indices(n_time, n_samples=5):
@@ -95,8 +119,11 @@ def validate_zarr(cfg, out_path: Path) -> bool:
         )
 
         missing = set(expected_vars) - set(ds.data_vars)
-        # land_mask (use_mask datasets) / interp_mask (fill_gaps.py) -- allowed, not required
-        extra = set(ds.data_vars) - set(expected_vars) - {"missing_mask", "land_mask", "interp_mask"}
+        # land_mask / valid_mask (land_mask datasets), interp_mask (fill_gaps.py) -- allowed,
+        # not required
+        extra = set(ds.data_vars) - set(expected_vars) - {
+            "missing_mask", "land_mask", "valid_mask", "interp_mask",
+        }
         ok &= _ok(not missing, "no missing variables (expected %s)", expected_vars)
         if extra:
             _warn("unexpected extra variable(s) in store: %s", sorted(extra))
@@ -133,6 +160,12 @@ def validate_zarr(cfg, out_path: Path) -> bool:
                 var, chunks, shards, time_chunk, time_shard,
             )
 
+        land = None
+        if cfg.dataset.get("land_mask", False):
+            masks_ok, land = _check_masks(cfg, out_path, ds.get("land_mask"), ds.get("valid_mask"))
+            ok &= masks_ok
+        filled = bool(cfg.dataset.get("fill_method"))
+
         if "spatial_ref" in ds.coords:
             crs_attrs = ds["spatial_ref"].attrs
             ok &= _ok(
@@ -162,6 +195,7 @@ def validate_zarr(cfg, out_path: Path) -> bool:
         n_time = ds.sizes.get("time", 0)
         for idx in _sample_time_indices(n_time):
             step = ds.isel(time=idx).compute()
+            written = "missing_mask" in step and not bool(step["missing_mask"])
             for var in expected_vars:
                 if var not in step:
                     continue
@@ -169,6 +203,11 @@ def validate_zarr(cfg, out_path: Path) -> bool:
                 nan_frac = float(np.isnan(arr).mean())
                 if nan_frac >= 1.0:
                     ok = _ok(False, "%s: 100%% NaN at time index %d", var, idx) and ok
+                if land is not None and written:
+                    ok &= _ok(
+                        _nan_only_on_land(arr, land, filled),
+                        "%s @ t=%d: NaN on land%s", var, idx, ", nowhere else" if filled else "",
+                    )
                 finite = arr[np.isfinite(arr)]
                 logger.info(
                     "  info %s @ t=%d: nan=%.1f%%%s",
@@ -196,8 +235,8 @@ def validate_npz(cfg, out_path: Path) -> bool:
 
     grid_size = cfg.domain.grid_size
     expected_keys = set(expected_vars) | {"lat", "lon", "y", "x", "crs"}
-    # alpha_ref (rotated grids) / land_mask (use_mask datasets) -- allowed, not required
-    optional_keys = {"alpha_ref", "land_mask"}
+    # alpha_ref (rotated grids) / land_mask, valid_mask (land_mask datasets) -- allowed, not required
+    optional_keys = {"alpha_ref", "land_mask", "valid_mask"}
 
     with np.load(npz_path, allow_pickle=True) as payload:
         missing = expected_keys - set(payload.files)
@@ -242,6 +281,14 @@ def validate_npz(cfg, out_path: Path) -> bool:
         else:
             ok = _ok(False, "crs array present") and ok
 
+        land = None
+        if cfg.dataset.get("land_mask", False):
+            masks_ok, land = _check_masks(
+                cfg, out_path, payload.get("land_mask"), payload.get("valid_mask"),
+            )
+            ok &= masks_ok
+        filled = bool(cfg.dataset.get("fill_method"))
+
         for var in expected_vars:
             if var not in payload:
                 continue
@@ -252,6 +299,11 @@ def validate_npz(cfg, out_path: Path) -> bool:
             )
             nan_frac = float(np.isnan(arr).mean())
             ok = _ok(nan_frac < 1.0, "%s: not 100%% NaN", var) and ok
+            if land is not None:
+                ok &= _ok(
+                    _nan_only_on_land(arr, land, filled),
+                    "%s: NaN on land%s", var, ", nowhere else" if filled else "",
+                )
             finite = arr[np.isfinite(arr)]
             logger.info(
                 "  info %s: nan=%.1f%%%s",

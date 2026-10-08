@@ -11,10 +11,11 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig
 
 from fill_gaps import fill_gaps_output
-from rechunk import rechunk_output
+from land_mask import build_land_mask
 from output_validation import validate_output
+from rechunk import rechunk_output
 
-MODES = ("run", "dry_run", "check", "rechunk", "fill_gaps")
+MODES = ("run", "dry_run", "check", "rechunk", "fill_gaps", "land_mask")
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="config")
@@ -39,6 +40,11 @@ def main(cfg: DictConfig):
     if mode == "fill_gaps":
         # only touches saved output: doesn't need source data
         fill_gaps_output(cfg)
+        return
+
+    if mode == "land_mask":
+        # shared land mask for this source/domain, from one sample of cfg.dataset
+        build_land_mask(cfg)
         return
 
     preproc_factory = instantiate(cfg.domain.preproc_cls)

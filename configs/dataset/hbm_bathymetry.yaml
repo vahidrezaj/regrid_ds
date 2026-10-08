@@ -11,9 +11,12 @@ variable_attrs: null
 static: true
 file_ext: .tif
 
-# interpolation/extrapolation method(s): a single string or a list of strings with one entry per variable
+# interpolation method(s): a single string or a list of strings with one entry per variable
 interp_method: bilinear
-extrap_method: null
+
+# hbm_ocean's land mask (the .tif's own NaN is both land and no coverage) + fill non-land gaps
+land_mask: true
+fill_method: laplace  # // nearest, laplace or null
 
 reader_fn:
   _target_: readers.read_tif

@@ -42,7 +42,18 @@ dev = [
 ]
 
 [tool.setuptools]
-py-modules = ["grid_interp", "readers", "writers", "output_validation", "regridder", "nemo_reader", "rechunk", "fill_gaps"]
+py-modules = [
+    "grid_interp",
+    "readers",
+    "writers",
+    "output_validation",
+    "regridder",
+    "nemo_reader",
+    "rechunk",
+    "fill_gaps",
+    "land_mask",
+    "spatial_fill",
+]
 
 [tool.setuptools.package-dir]
 "" = "src"

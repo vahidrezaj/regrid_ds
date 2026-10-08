@@ -1,6 +1,35 @@
 '''
 Dataset-agnostic output: `save_static_npz` for time-invariant sources (e.g. bathymetry),
 `ZarrDataWriter` for the time-series Zarr store.
+
+The output Zarr store always contains:
+    - <vars>        (time, lat, lon)
+    - time          (time,)   : full time axis (domain.from_to, ts)
+    - y, x          (y,), (x,): grid axes in metres
+    - lat, lon      (y, x)    : 2D geolocation (use instead of spatial_ref when grid is rotated)
+    - spatial_ref   scalar    : CF projection info (AEQD centre)
+    - missing_mask  (time,)   : True where a timestep has no source data
+And conditionally:
+    - alpha_ref     scalar    : grid rotation in degrees (only if alpha_deg != 0)
+    - interp_mask   (time,)   : True where a timestep was time-interpolated (only after fill_gaps)
+    - land_mask     (y, x)    : True = land / NaN in data (only if land_mask=True)
+    - valid_mask    (y, x)    : True = real data at every timestep (only if land_mask=True)
+
+Static .npz (bathymetry.npz)
+    - <vars>     (y, x)
+    - lat, lon   (y, x)    : 2D geolocation
+    - y, x       (y,), (x,): grid axes in metres
+    - crs        scalar    : projection info
+    - alpha_ref  scalar    : grid rotation in degrees (only if grid is rotated)
+    - land_mask  (y, x)    : True = land (both bathymetry configs use land_mask=True)
+    - valid_mask (y, x)    : True = real data at every timestep
+
+land_mask.npz (built once by mode=land_mask, shared per source/domain):
+    - land_mask  (y, x)    : True = land
+    - covered    (y, x)    : True = inside the ocean model's coverage (used for diagnostics only)
+    - lat, lon   (y, x)    : 2D geolocation
+    - y, x       (y,), (x,): grid axes in metres
+    - crs        scalar    : projection info
 '''
 
 import os
@@ -139,6 +168,7 @@ class ZarrDataWriter:
         self.store = zarr.open_group(self.zarr_path, mode="a")
 
         self._has_land_mask = "land_mask" in self.store
+        self._has_valid_mask = "valid_mask" in self.store
 
         # most recently written (time, {var: values}), or None if nothing has been written yet
         # used for time interpolation when enabled in config
@@ -374,21 +404,58 @@ class ZarrDataWriter:
     def write_land_mask(self, land_mask):
         '''
         Save the static (y, x) land mask (True = land)
-        No-op if `land_mask` is None or the store already has one.
+        No-op if `land_mask` is None or the store already has the same one; raises if
+        it has a different one (data written with two masks can't be mixed).
         '''
-        if land_mask is None or self._has_land_mask:
+        if land_mask is None:
+            return
+        if self._has_land_mask:
+            store = zarr.open_group(self.zarr_path, mode="r")
+            stored = np.asarray(store["land_mask"][:], dtype=bool)
+            if not np.array_equal(stored, np.asarray(land_mask, dtype=bool)):
+                raise ValueError(
+                    f"{self.zarr_path} has a different land_mask than the current "
+                    "land_mask.npz: delete the store and rerun"
+                )
             return
         xr.Dataset({
             "land_mask": (("y", "x"), np.asarray(land_mask, dtype=bool), {
                 "long_name": "land mask",
-                "description": "True = land (or outside source coverage), "
-                               "same mask used to NaN out land in the data variables",
+                "description": "True = land, NaN in the data variables. Shared by every "
+                               "dataset of this source/domain (land_mask.npz)",
             }),
         }).to_zarr(
             self.zarr_path, mode="a", consolidated=True,
             encoding={"land_mask": {"chunks": land_mask.shape}},
         )
         self._has_land_mask = True
+
+    def write_valid_mask(self, valid_mask):
+        '''
+        Save the static (y, x) valid mask (True = real data, not land or gap fill), ANDed
+        with the stored one so a resumed run keeps only cells valid in both. No-op if None.
+        '''
+        if valid_mask is None:
+            return
+        valid_mask = np.asarray(valid_mask, dtype=bool)
+        if self._has_valid_mask:
+            store = zarr.open_group(self.zarr_path, mode="a")
+            stored = np.asarray(store["valid_mask"][:], dtype=bool)
+            if not np.array_equal(stored, stored & valid_mask):
+                store["valid_mask"][:] = stored & valid_mask
+            return
+        xr.Dataset({
+            "valid_mask": (("y", "x"), valid_mask, {
+                "long_name": "valid data mask",
+                "description": "True = real regridded data in every timestep; False = land "
+                               "or gap-filled (see fill_method). Use it to evaluate on real "
+                               "data only",
+            }),
+        }).to_zarr(
+            self.zarr_path, mode="a", consolidated=True,
+            encoding={"valid_mask": {"chunks": valid_mask.shape}},
+        )
+        self._has_valid_mask = True
 
     def close(self):
         '''No-op in the current impelmentation:

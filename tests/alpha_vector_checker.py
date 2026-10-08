@@ -169,9 +169,8 @@ def regrid_true_vectors(cfg, ds_list, time_mask, alpha_deg):
         target_grid=target_grid,
         variable_names=_to_plain(cfg.dataset.variable_names),
         interp_method=_to_plain(cfg.dataset.interp_method),
-        extrap_method=_to_plain(cfg.dataset.extrap_method),
         pair_vars_list=_to_plain(cfg.dataset.get("pair_vars_list", [])),
-        use_mask=bool(cfg.dataset.get("use_mask", True)),
+        # no land mask/fill: land_mask.npz only fits one alpha_deg, and raw vectors compare cleaner
     )
     ds = pipeline(ds_list, time_mask)
     u_var, v_var = PAIR_VARS

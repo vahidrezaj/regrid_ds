@@ -26,13 +26,15 @@ variable_attrs: null
 interp_method: bilinear
 # interp_method: [bilinear, nearest_s2d]   # one entry per variable
 
-# How to fill gaps outside the source's own coverage.
-extrap_method: nearest_s2d
-# extrap_method: null   # no extrapolation
+# Use the domain's shared land mask (output_path/land_mask.npz, built once with
+# `mode=land_mask` from the ocean model dataset)? Land is NaN and never filled.
+# false = no land, every NaN is a gap (e.g. atmospheric forcing).
+land_mask: true
 
-# Is NaN in the source a real land mask, or just a coverage gap?
-# true = land, leave masked (default); false = gap, let extrap_method fill it in. 
-use_mask: true
+# How to fill NaN cells that aren't land, on the target grid after regridding.
+fill_method: nearest
+# fill_method: laplace   # smooth, valid cells fixed
+# fill_method: null      # leave gaps as NaN
 
 # Vector variable pairs to rotate from true north/east into the target grid's own axes.
 pair_vars_list: []
