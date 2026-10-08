@@ -16,11 +16,12 @@ variable_attrs:
     units: "m s**-1"
     long_name: "10 metre V wind component"
 
-# interpolation/extrapolation method(s): a single string or a list of strings with one entry per variable
+# interpolation method(s): a single string or a list of strings with one entry per variable
 interp_method: bilinear
-extrap_method: nearest_s2d
 
-use_mask: false  # ERA5 is a complete global field; NaN (if any) is coverage, not land
+# no land: ERA5 is a complete global field; NaN (if any) is coverage, not land
+land_mask: false
+fill_method: laplace  # // nearest, laplace or null
 
 # Optional: ERA5 is 3-hourly; interpolate onto domain.ts's hourly grid.
 time_interp_method: [linear, 3]  # // # [method, max_gap (hours)]

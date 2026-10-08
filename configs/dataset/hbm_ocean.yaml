@@ -7,9 +7,12 @@ variable_names: [elev, uvel, vvel, salt, temp]
 # Optional new names/attrs: 
 variable_attrs: null
 
-# interpolation/extrapolation method(s): a single string or a list of strings with one entry per variable
+# interpolation method(s): a single string or a list of strings with one entry per variable
 interp_method: bilinear
-extrap_method: null
+
+# shared land mask (build first: mode=land_mask dataset=hbm_ocean) + fill non-land gaps
+land_mask: true
+fill_method: laplace  # // nearest, laplace or null
 
 # paired vector variables for rotation-aware regridding (from true north/east into the target grid's local basis):
 pair_vars_list:

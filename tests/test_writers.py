@@ -103,6 +103,61 @@ def test_write_and_gaps(tmp_path, target_grid, time_vector):
     ds.close()
 
 
+def test_write_valid_mask_keeps_cells_valid_in_every_write(tmp_path, target_grid, time_vector):
+    zarr_path = str(tmp_path / "test.zarr")
+
+    def open_writer():
+        return ZarrDataWriter(
+            zarr_path=zarr_path, time_vector=time_vector, variable_names=["sst"],
+            target_grid=target_grid, time_chunk=4,
+        )
+
+    writer = open_writer()
+    writer.write_valid_mask(None)  # forcing: nothing written
+    with xr.open_zarr(zarr_path, consolidated=True) as ds:
+        assert "valid_mask" not in ds
+
+    valid = np.ones(target_grid["lat"].shape, dtype=bool)
+    valid[0] = False
+    writer.write_valid_mask(valid)
+    writer.write_valid_mask(valid)
+
+    # resumed run with one more invalid cell: ANDed with the stored mask
+    smaller = valid.copy()
+    smaller[1, 1] = False
+    open_writer().write_valid_mask(smaller)
+    open_writer().write_valid_mask(valid)  # can't grow back
+
+    with xr.open_zarr(zarr_path, consolidated=True) as ds:
+        np.testing.assert_array_equal(ds["valid_mask"].values, smaller)
+        assert ds["valid_mask"].dims == ("y", "x")
+
+
+def test_write_land_mask_rejects_a_different_mask(tmp_path, target_grid, time_vector):
+    zarr_path = str(tmp_path / "test.zarr")
+
+    def open_writer():
+        return ZarrDataWriter(
+            zarr_path=zarr_path, time_vector=time_vector, variable_names=["sst"],
+            target_grid=target_grid, time_chunk=4,
+        )
+
+    land = np.zeros(target_grid["lat"].shape, dtype=bool)
+    land[0] = True
+    writer = open_writer()
+    writer.write_land_mask(land)
+    writer.write_land_mask(land)  # same mask, same session: fine
+    open_writer().write_land_mask(land)  # same mask after reopen: fine
+
+    other = land.copy()
+    other[1, 1] = True
+    with pytest.raises(ValueError, match="different land_mask"):
+        open_writer().write_land_mask(other)
+
+    with xr.open_zarr(zarr_path, consolidated=True) as ds:
+        np.testing.assert_array_equal(ds["land_mask"].values, land)
+
+
 def test_sharded_write(tmp_path, target_grid, time_vector):
     ''' 1-step chunks grouped into 4-step shards: layout on disk, and partial shard writes
     (a write covering only part of a shard must keep what's already in it) '''

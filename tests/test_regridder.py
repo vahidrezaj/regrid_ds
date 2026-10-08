@@ -1,5 +1,5 @@
-'''Tests for regridder.PreProcessing: file-queue discovery (domain.file_match glob) and
-file_batch batching + checkpoint/resume'''
+'''Tests for regridder.PreProcessing: file-queue discovery (domain.file_match glob),
+file_batch batching + checkpoint/resume, and the land/valid masks'''
 
 import json
 
@@ -9,7 +9,10 @@ import xarray as xr
 import zarr
 from omegaconf import OmegaConf
 
+from grid_interp import create_local_metric_grid
+from land_mask import LAND_MASK_FILE
 from regridder import PreProcessing
+from writers import save_static_npz
 
 
 def _make_cfg(folder, tokens, out_path):
@@ -21,7 +24,6 @@ def _make_cfg(folder, tokens, out_path):
             "variable_names": ["sst"],
             "variable_attrs": None,
             "interp_method": "bilinear",
-            "extrap_method": None,
             "reader_fn": {"_target_": "readers.read_nc", "_partial_": True},
         },
         "domain": {
@@ -103,8 +105,7 @@ def _write_hourly_files(data_dir):
 def _make_run_cfg(data_dir, out_path, file_batch, time_batch):
     cfg = _make_cfg(data_dir, None, out_path)
     cfg.mode = "run"
-    cfg.dataset.extrap_method = "nearest_s2d"
-    cfg.dataset.use_mask = False
+    cfg.dataset.fill_method = "nearest"
     cfg.dataset.file_batch = file_batch
     cfg.domain.from_to = ["2000-01-01T00:00", "2000-01-01T12:00"]
     cfg.domain.time_chunk = 1
@@ -181,6 +182,33 @@ def test_file_batch_checkpoint_resume_after_crash_mid_batch(hourly_dir, tmp_path
     np.testing.assert_array_equal(missing, ref_missing)
     np.testing.assert_allclose(sst, ref_sst, equal_nan=True)
     assert not resumed.cp_path.exists()
+
+
+def test_run_with_land_mask_saves_land_and_valid_masks(hourly_dir, tmp_path):
+    out = tmp_path / "out"
+    cfg = _make_run_cfg(hourly_dir, out, file_batch=3, time_batch=None)
+    cfg.dataset.land_mask = True
+    grid = create_local_metric_grid(100, 3, 60.0, 10.0)
+    land = np.zeros(grid["lat"].shape, dtype=bool)
+    land[:, 0] = True
+    save_static_npz(out / LAND_MASK_FILE, {"land_mask": land}, grid)
+
+    PreProcessing(cfg)()
+
+    store = zarr.open_group(out / "ds.zarr", mode="r")
+    np.testing.assert_array_equal(store["land_mask"][:], land)
+    np.testing.assert_array_equal(store["valid_mask"][:], ~land)  # source covers the grid
+    sst, missing = _read_store(out)
+    written = sst[~missing]
+    assert np.isnan(written[:, land]).all() and np.isfinite(written[:, ~land]).all()
+
+
+def test_run_without_land_mask_file_fails_early(hourly_dir, tmp_path):
+    cfg = _make_run_cfg(hourly_dir, tmp_path / "out", file_batch=1, time_batch=None)
+    cfg.dataset.land_mask = True
+    with pytest.raises(FileNotFoundError, match="mode=land_mask"):
+        PreProcessing(cfg)
+    assert not (tmp_path / "out" / "ds.zarr").exists()
 
 
 @pytest.mark.parametrize("file_batch", [None, 0, -5])

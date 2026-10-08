@@ -16,6 +16,7 @@ from hydra.utils import instantiate
 from omegaconf import OmegaConf
 
 from grid_interp import RegridPipeline, create_local_metric_grid
+from land_mask import LAND_MASK_FILE, load_land_mask
 from writers import ZarrDataWriter, save_static_npz
 
 logger = logging.getLogger(__name__)
@@ -49,7 +50,9 @@ class PreProcessing:
         - `dataset.variable_names` : source variable names to read/regrid.
         - `dataset.variable_attrs` : optional per-variable rename/attrs override,
           forwarded to `ZarrDataWriter`.
-        - `dataset.interp_method` / `dataset.extrap_method` : passed to `RegridPipeline`.
+        - `dataset.interp_method` / `dataset.fill_method` : passed to `RegridPipeline`.
+        - `dataset.land_mask` : bool, default `False`. `True` loads the domain's shared
+          `land_mask.npz` from `output_path` (built by `mode=land_mask`, see `land_mask.py`).
         - `dataset.pair_vars_list` : optional list of `[u, v]` variable-name pairs that
           need rotation-aware regridding, passed to `RegridPipeline`.
         - `dataset.reader_fn` : a `_partial_: true` target instantiated into `loader_fn`,
@@ -195,14 +198,21 @@ class PreProcessing:
         # file reader function:
         self.loader_fn = instantiate(cfg.dataset.reader_fn)
 
-        # regrid pipeline: caches per-region xesmf regridders/masks
+        # shared land mask (see land_mask.py), only needed for a real run
+        self.uses_land_mask = bool(cfg.dataset.get("land_mask", False))
+        land_mask = None
+        if self.uses_land_mask and not dry_run:
+            land_mask = load_land_mask(self.out_path, self.target_grid)
+
+        # regrid pipeline: caches per-region xesmf regridders
+        self.fill_method = cfg.dataset.get("fill_method", None)
         self.regrid_pipeline = RegridPipeline(
             target_grid=self.target_grid,
             variable_names=self.variable_names,
             interp_method=_to_plain(cfg.dataset.interp_method),
-            extrap_method=_to_plain(cfg.dataset.extrap_method),
             pair_vars_list=_to_plain(cfg.dataset.get("pair_vars_list", [])),
-            use_mask=bool(cfg.dataset.get("use_mask", True)),
+            land_mask=land_mask,
+            fill_method=self.fill_method,
         )
 
         if self.static:
@@ -246,10 +256,17 @@ class PreProcessing:
             time_shard=self.time_shard,
             clevel=cfg.domain.clevel,
         )
+        # before any data, so a store with a different land mask fails early
+        self.writer.write_land_mask(land_mask)
 
     def report(self):
         ''' log a summary of what __call__ would do, without touching any data '''
         logger.info("[%s] source: %s", self.dataset_name, self.data_path)
+        if self.uses_land_mask:
+            npz_path = self.out_path / LAND_MASK_FILE
+            status = "found" if npz_path.exists() else "MISSING, run mode=land_mask first"
+            logger.info("[%s] land mask: %s (%s)", self.dataset_name, npz_path, status)
+        logger.info("[%s] fill_method: %s", self.dataset_name, self.fill_method)
 
         if self.length_mismatch:
             logger.warning(
@@ -351,9 +368,9 @@ class PreProcessing:
                 ds = self._fill_time_gaps(ds)
                 t1 = monotonic()
 
-                # write Zarr dataset (+ static land mask, once):
+                # write Zarr dataset:
                 self.writer.write(ds)
-                self.writer.write_land_mask(self.regrid_pipeline.land_mask)
+                self.writer.write_valid_mask(self.regrid_pipeline.valid_mask)
                 del ds
                 regrid_s += t1 - t0
                 write_s += monotonic() - t1
@@ -392,6 +409,13 @@ class PreProcessing:
             "[%s] completed: %d files processed in %s",
             self.dataset_name, processed, _fmt_duration(monotonic() - start_time),
         )
+        valid = self.regrid_pipeline.valid_mask
+        if valid is not None:
+            ocean = (~self.regrid_pipeline.land_mask).sum()
+            logger.info(
+                "[%s] valid_mask: %d of %d ocean cells never gap-filled in this run",
+                self.dataset_name, valid.sum(), ocean,
+            )
 
     def _read_batch(self, files):
         ''' read `files` (one list per region, same length) and concat each region along time.
@@ -495,6 +519,7 @@ class PreProcessing:
         land_mask = self.regrid_pipeline.land_mask
         if land_mask is not None:
             arrays["land_mask"] = land_mask
+            arrays["valid_mask"] = self.regrid_pipeline.valid_mask
         save_static_npz(self.npz_path, arrays, self.target_grid)
 
     def _store_name(self, var):

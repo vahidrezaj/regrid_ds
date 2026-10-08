@@ -11,9 +11,12 @@ variable_attrs: null
 static: true
 file_ext: .nc
 
-# interpolation/extrapolation method(s): a single string or a list of strings with one entry per variable
+# interpolation method(s): a single string or a list of strings with one entry per variable
 interp_method: bilinear
-extrap_method: nearest_s2d
+
+# nemo_ocean's land mask + fill non-land gaps
+land_mask: true
+fill_method: laplace  # // nearest, laplace or null
 
 reader_fn:
   _target_: nemo_reader.read_nemo_bathymetry
